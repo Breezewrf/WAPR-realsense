@@ -1,0 +1,13 @@
+# WAPR-realsense core helpers; preserve the target's existing GPU software stack.
+# Install CUDA PyTorch, TensorRT 10.x, one OpenCV provider and the RealSense SDK
+# using the target's desktop/JetPack instructions in docs/install.md.
+numpy
+scipy
+kornia
+trimesh
+pybind11
+pillow
+onnx
+filelock
+packaging
+huggingface-hub>=0.34,<1

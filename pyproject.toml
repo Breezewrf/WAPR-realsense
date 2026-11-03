@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wapr-realsense"
+version = "0.1.0"
+description = "RealSense RGB-D single-object 6D pose tracking for robotics, based on WAPR"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = [
+    "numpy",
+    "scipy",
+    "trimesh",
+    "Pillow",
+    "kornia",
+    "filelock",
+    "packaging",
+    "huggingface-hub>=0.34,<1",
+]
+
+# CUDA PyTorch, TensorRT and one OpenCV provider are supplied by the target host.
+# Camera SDK installation is separate on Jetson when supplied by librealsense.
+[project.optional-dependencies]
+desktop = ["opencv-python", "pyrealsense2"]
+export = ["onnx", "pybind11"]
+
+[project.scripts]
+wapr-realsense = "wapr_realsense.app:entrypoint"
+
+[tool.setuptools.packages.find]
+include = ["wapr", "wapr_realsense"]
+
+[tool.setuptools.package-data]
+wapr = [
+    "*.json", "fonts/*", "weight_license/*", "runtime_assets/**/*",
+    "ogl_native/CMakeLists.txt", "ogl_native/cpp/*", "ogl_native/cuda/*",
+    "ogl_native/python/*", "ogl_native/shaders/*", "ogl_native/third_party/**/*",
+]
+
+[tool.setuptools]
+license-files = ["LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "UPSTREAM.md"]

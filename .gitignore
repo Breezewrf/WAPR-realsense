@@ -1,0 +1,34 @@
+# Local environments and Python/build artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.release/
+.pytest_cache/
+.ruff_cache/
+
+# Machine-specific runtime, recordings, model weights and compiled engines
+.wapr_runtime/
+outputs/
+cache/
+*.engine
+*.onnx
+*.pth
+*.pt
+*.bag
+*.so
+*.dll
+*.pyd
+*.log
+
+# Each operator supplies their own object mesh; preserve the usage note.
+/assets/meshes/**
+!/assets/meshes/README.md
+
+.DS_Store
+.env
+.env.*
+!.env.example
