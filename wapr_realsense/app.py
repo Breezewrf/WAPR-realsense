@@ -78,6 +78,10 @@ def parse_args(argv=None):
     parser.add_argument("--min-score", type=float, default=0.5, help="WBPS heuristic gate, not a success probability")
     parser.add_argument("--bbox", nargs=4, type=int, metavar=("X", "Y", "W", "H"))
     parser.add_argument("--no-display", action="store_true")
+    parser.add_argument("--web", action="store_true", help="Serve the browser demo with automatic or manual initialization")
+    parser.add_argument("--web-host", default="127.0.0.1", help="Use 0.0.0.0 for Jetson LAN access")
+    parser.add_argument("--web-port", type=int, default=8000)
+    parser.add_argument("--web-demo", action="store_true", help="Simulated browser lifecycle; no camera or models")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--log-poses", action="store_true", help="Also print verbose POSE_JSON records; files always contain every frame")
@@ -128,6 +132,13 @@ def parse_args(argv=None):
                 parser.error("Invalid value for configuration field %s: %s" % (name, value))
             parser.set_defaults(**{name: value})
     args = parser.parse_args(argv)
+    if args.web_demo:
+        args.web = True
+    if not 1 <= args.web_port <= 65535:
+        parser.error("--web-port must be between 1 and 65535")
+    if args.web:
+        if args.replay or args.check_camera or args.bbox is not None:
+            parser.error("--web cannot be combined with --replay, --check-camera or --bbox")
     for name in ("width", "height", "fps", "print_every"):
         if getattr(args, name) <= 0:
             parser.error("--%s must be positive" % name.replace("_", "-"))
@@ -145,11 +156,11 @@ def parse_args(argv=None):
         parser.error("--timing-interval must be finite and positive")
     if args.init == "auto" and args.bbox is not None:
         parser.error("--bbox is only supported with --init roi")
-    if args.init == "roi" and args.no_display and args.bbox is None and not args.replay and not args.check_camera:
+    if args.init == "roi" and args.no_display and args.bbox is None and not args.replay and not args.check_camera and not args.web:
         parser.error("Headless tracking requires --bbox X Y W H")
     return args
 
-def timed_step(session, frame, bbox=None, tracking_timing=None):
+def timed_step(session, frame, bbox=None, tracking_timing=None, initialization_part="INIT"):
     """Measure one pose step, reporting tracking attempts even if they are rejected."""
     tracking = session.pose is not None and bbox is None
     if not tracking and tracking_timing is not None:
@@ -161,7 +172,7 @@ def timed_step(session, frame, bbox=None, tracking_timing=None):
         if status == "lost":
             tracking_timing.flush()
     elif bbox is not None:
-        print_timing("INIT", f"WAPR initialization={timer.elapsed_ms:.2f} ms | result={status}")
+        print_timing(initialization_part, f"WAPR initialization={timer.elapsed_ms:.2f} ms | result={status}")
     return status, row, timer.elapsed_ms
 
 
@@ -204,6 +215,9 @@ def replay(args, session, mesh, output, writer, tracking_timing=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.web:
+        from .web import run
+        return run(args)
     if args.check_camera:
         with RealSenseCamera(args.width, args.height, args.fps, args.serial) as camera:
             frame = camera.read()

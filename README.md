@@ -179,6 +179,59 @@ before selecting a target. Values are wall-clock milliseconds including CPU work
 with CUDA synchronized before and after each stage. These extra synchronizations can affect stage
 overlap. Colors are enabled automatically in a terminal; redirected output or `NO_COLOR=1` uses plain text.
 
+## Browser demo
+
+```bash
+python -m wapr_realsense --config configs/box.auto.yaml --web
+# Start in manual mode, without loading automatic detection models:
+python -m wapr_realsense --config configs/box.yaml --web
+# LAN access on Jetson:
+python -m wapr_realsense --config configs/box.auto.yaml --web --web-host 0.0.0.0
+```
+
+Open `http://127.0.0.1:8000` locally, or `http://<jetson-ip>:8000` over the LAN.
+The camera view shows the 3D box and axes. A small dashboard on the right contains
+the status, manual initialization switch, Detect button and timing summaries. All static resources ship with
+the Python package; Node, external CDNs and a desktop display are unnecessary.
+
+- **WARMUP**: load and warm up models; blank preview and disabled controls. All warmup results are discarded.
+- **INITIALIZED**: camera preview is available; wait for the user to click **Detect**.
+- **Looking for object**: initial detection or automatic recovery after tracking loss. Detect is disabled while searching.
+- **TRACKING**: show the pose overlay. Clicking Detect again starts a new search.
+
+The switch initially follows the configured initialization mode. Enable manual
+initialization to freeze a frame, drag a bounding box, then click Detect. The
+redraw button obtains a new frozen frame. Pixel coordinates are mapped to the
+original image and tied to that exact RGB-D frame. Successful tracking restores
+the live view. **Loss in manual mode clears the old box and prompts the user to
+draw a new one; it never searches automatically or reuses the old box.** Automatic
+mode retains search and recovery. Warmup and search disable the switch. Switching
+from manual to automatic loads and warms detection models on demand under WARMUP,
+then waits for Detect. Changing modes resets the previous track.
+
+The dashboard receives the same `[WARMUP]`, latest `[INIT]` / `[REINIT]`, and
+`[TRACKING]` summaries as the terminal. Tracking means and frame counts use
+`--timing-interval`. Warmup details collapse when ready and remain available.
+SAM2 / DINOv2 show `skipped` when no proposals exercise those stages. Pose and
+tracking warmup use representative single-instance workloads; different real
+candidate batch sizes may still incur additional first-use overhead.
+During synchronous searches, the preview holds the search input frame while
+HTTP status requests remain responsive. Browser disconnection hides the old
+preview and disables controls; reconnection restores the current session.
+
+To inspect the UI without a camera or CUDA, use the explicitly labelled simulation:
+
+```bash
+python -m wapr_realsense --web-demo
+```
+
+The simulation warms up for about 2 seconds and supports both modes; it defaults
+to manual drawing. It finds an object about 2 seconds after Detect and simulates
+loss after about 12 seconds of tracking, then waits for a new box or recovers
+automatically according to the selected mode. Real operation preserves the pose
+file output contracts and adds `initialization_mode` to each frame record.
+Jetson inference has not been validated here.
+
 ## Pose output
 
 The box config writes `outputs/box/latest.json`, `poses.jsonl`, `camera.json` and `session.json`.

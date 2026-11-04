@@ -43,6 +43,7 @@ wapr-realsense = "wapr_realsense.app:entrypoint"
 include = ["wapr", "wapr_realsense"]
 
 [tool.setuptools.package-data]
+wapr_realsense = ["static/*"]
 wapr = [
     "*.json", "fonts/*", "weight_license/*", "runtime_assets/**/*",
     "ogl_native/CMakeLists.txt", "ogl_native/cpp/*", "ogl_native/cuda/*",

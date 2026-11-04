@@ -9,6 +9,7 @@ import time
 
 _phase = ContextVar("component_timing_phase", default=None)
 _collector = ContextVar("component_timing_collector", default=None)
+_listener = ContextVar("timing_listener", default=None)
 
 
 def print_timing(part, message):
@@ -18,6 +19,19 @@ def print_timing(part, message):
     if part in colors and sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb":
         line = f"\033[{colors[part]}m{line}\033[0m"
     print(line, flush=True)
+    listener = _listener.get()
+    if listener is not None:
+        listener(part, message)
+
+
+@contextmanager
+def timing_listener(listener):
+    """Forward the same summaries to an optional UI on the inference thread."""
+    token = _listener.set(listener)
+    try:
+        yield
+    finally:
+        _listener.reset(token)
 
 
 class TimingCollector:
