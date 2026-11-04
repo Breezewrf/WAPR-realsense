@@ -65,6 +65,7 @@ from wapr.bootstrap import ensure_optional
 from wapr.installation import prepare_optional
 from wapr.recipe import resolve_backend
 from wapr.resources import weights_dir, resource_root, cache_dir
+from wapr.timing import ComponentTimer
 
 
 release_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -836,9 +837,12 @@ def _load_tensor_file(path, map_location='cpu'):
     return torch.load(path, **load_options)
 
 
-def prepare_det2d_weights(weights_dir, dino='vitl14', grounding='swinb'):
+def prepare_det2d_weights(weights_dir, dino='vitl14', grounding='swinb', use_sam=True):
     """
     # Place the selected DINOv2, GroundingDINO, SAM, and BERT files under weights_dir.
+
+        use_sam=False skips the SAM checkpoint download and verification.
+        use_sam=False 时不下载或校验 SAM 权重。
 
         A catalog sha256 on the chosen row is checked when that row has one.
 
@@ -889,13 +893,14 @@ def prepare_det2d_weights(weights_dir, dino='vitl14', grounding='swinb'):
     _place_file(weights_dir, dino_spec['file'], dino_spec['url'], dino_spec.get('sha256'))
     _place_file(weights_dir, grounding_spec['file'], grounding_spec['url'], grounding_spec.get('sha256'))
     _place_config(weights_dir, grounding_spec)
-    for relative, url, expected in SHARED_DOWNLOADS:
+    shared_downloads = [row for row in SHARED_DOWNLOADS if use_sam or row[0] != 'sam2.1_l.pt']
+    for relative, url, expected in shared_downloads:
         _place_file(weights_dir, relative, url, expected)
     if dino_spec['hub'] == 'dinov2_vitl14' and grounding_spec['file'].startswith('groundingdino_swinb'):
-        return verify_assets(weights_dir)
+        return verify_assets(weights_dir, use_sam=use_sam)
     with open(det2d_manifest_path) as stream:
         artifacts = json.load(stream)['artifacts']
-    shared_names = [relative for relative, _url, _expected in SHARED_DOWNLOADS]
+    shared_names = [relative for relative, _url, _expected in shared_downloads]
     for name in shared_names:
         if sha256(os.path.join(weights_dir, name)) != artifacts[name]['sha256']:
             raise RuntimeError('Detection weight differs from det2d_assets.json: ' + name)
@@ -1071,9 +1076,11 @@ def ensure_dino_engine(weights_dir=default_weights_dir, device='cuda:0', dino='v
     return build_dino_engine(weights_dir, device, dino_repo, dino=dino)
 
 
-def verify_assets(weights_dir):
+def verify_assets(weights_dir, use_sam=True):
     """
     # Check downloaded weight and BERT bytes against det2d_assets.json.
+
+        use_sam=False excludes the SAM checkpoint from verification.
 
         Source checkouts under third_party/ are not hashed here.
 
@@ -1107,7 +1114,7 @@ def verify_assets(weights_dir):
     with open(det2d_manifest_path) as stream:
         manifest = json.load(stream)
     for name, record in manifest['artifacts'].items():
-        if name.endswith('.engine'):
+        if name.endswith('.engine') or (not use_sam and name == 'sam2.1_l.pt'):
             continue
         path = os.path.join(weights_dir, name)
         digest = sha256(path)
@@ -2054,6 +2061,38 @@ class DinoTRT:
         return {key: torch.cat(values) for key, values in chunks.items()}
 
 
+def bbox_regions(boxes, height, width):
+    """Rectangle support for DINO crops and NMS when segmentation is disabled."""
+    xs = torch.arange(width, device=boxes.device)[None, None, :]
+    ys = torch.arange(height, device=boxes.device)[None, :, None]
+    return ((xs >= boxes[:, 0, None, None]) & (xs < boxes[:, 2, None, None])
+            & (ys >= boxes[:, 1, None, None]) & (ys < boxes[:, 3, None, None]))
+
+
+def align_sam_proposals(result, boxes, objectness, height, width):
+    """Preserve proposal identity after Ultralytics filters low-confidence masks.
+
+    SAM Results.boxes.cls contains the original prompt index, not an object class.
+    Do not pair the remaining masks with the first N GroundingDINO boxes.
+    """
+    if result.masks is None or len(result.masks.data) == 0:
+        return boxes[:0], torch.empty((0, height, width), device=boxes.device, dtype=torch.bool), objectness[:0]
+    masks = result.masks.data.to(device=boxes.device, dtype=torch.bool)
+    if masks.ndim != 3 or tuple(masks.shape[1:]) != (height, width):
+        raise RuntimeError('SAM returned unexpected spatial mask dimensions: %s; expected (*, %d, %d)' %
+                           (tuple(masks.shape), height, width))
+    if result.boxes is None:
+        raise RuntimeError('SAM returned masks without prompt indices')
+    prompt_ids = result.boxes.cls.to(device=boxes.device)
+    indices = prompt_ids.long()
+    if (prompt_ids.ndim != 1 or len(indices) != len(masks) or not torch.isfinite(prompt_ids).all()
+            or not torch.equal(prompt_ids, indices.to(prompt_ids.dtype))
+            or (indices < 0).any() or (indices >= len(boxes)).any()
+            or len(torch.unique(indices)) != len(indices)):
+        raise RuntimeError('SAM returned invalid or ambiguous prompt indices')
+    return boxes[indices], masks, objectness[indices]
+
+
 class GroundingSAM:
     """
     # Frozen FP32 GroundingDINO proposals and one SAM 2.1-L box prompt per image.
@@ -2100,9 +2139,12 @@ class GroundingSAM:
 
         直接调用写成 GroundingSAM(...)。
     """
-    def __init__(self, weights_dir=default_weights_dir, device='cuda:0', grounding='swinb'):
+    def __init__(self, weights_dir=default_weights_dir, device='cuda:0', grounding='swinb', use_sam=True):
         """
         # Load GroundingDINO and SAM 2.1-L in FP32.
+
+            use_sam=False skips SAM import/loading and returns rectangle support regions.
+            use_sam=False 时不导入或加载 SAM，返回矩形支撑区域。
 
             weights_dir contains the GroundingDINO config, the checkpoint, bert-base-uncased, and sam2.1_l.pt.
 
@@ -2139,9 +2181,8 @@ class GroundingSAM:
         # Package changes must pass WAPR's reviewed installation plan.
         # 包变更必须经过 WAPR 安装计划确认，禁用上游隐式自动安装。
         os.environ['YOLO_AUTOINSTALL'] = 'false'
-        from ultralytics import SAM
-
         self.device = torch.device(device)
+        self.use_sam = use_sam
         self.spec = det2d_choice(GROUNDING_CHOICES, grounding, 'grounding')
         self.grounding = str(grounding)
         with open(os.path.join(weights_dir, self.spec['config'])) as stream:
@@ -2155,7 +2196,10 @@ class GroundingSAM:
         self.model = self.model.eval().to(self.device)
         self.transform = transforms.Compose([transforms.RandomResize([800], max_size=1333), transforms.ToTensor(),
                                              transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
-        self.segmentor = SAM(os.path.join(weights_dir, 'sam2.1_l.pt'))
+        self.segmentor = None
+        if self.use_sam:
+            from ultralytics import SAM
+            self.segmentor = SAM(os.path.join(weights_dir, 'sam2.1_l.pt'))
 
     @torch.inference_mode()
     def predict(self, rgb):
@@ -2213,39 +2257,42 @@ class GroundingSAM:
 """
         from PIL import Image
         from torchvision.ops import box_convert, nms
-        from ultralytics.cfg import DEFAULT_CFG_DICT
 
         height, width = rgb.shape[:2]
-        image, _ = self.transform(Image.fromarray(rgb), None)
-        with torch.autocast('cuda', enabled=False):
-            output = self.model(image.to(self.device)[None], captions=[caption])
-        objectness = output['pred_logits'][0].sigmoid().max(-1).values
-        selected = objectness >= box_threshold
-        boxes = box_convert(output['pred_boxes'][0][selected], 'cxcywh', 'xyxy')
-        boxes *= torch.tensor([width, height, width, height], device=self.device)
-        boxes[:, 0::2].clamp_(0, width)
-        boxes[:, 1::2].clamp_(0, height)
-        objectness = objectness[selected]
-        valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
-        boxes, objectness = boxes[valid], objectness[valid]
-        keep = nms(boxes, objectness, box_nms_threshold)
-        boxes, objectness = boxes[keep], objectness[keep]
+        with ComponentTimer("GroundingDINO", self.device):
+            image, _ = self.transform(Image.fromarray(rgb), None)
+            with torch.autocast('cuda', enabled=False):
+                output = self.model(image.to(self.device)[None], captions=[caption])
+            objectness = output['pred_logits'][0].sigmoid().max(-1).values
+            selected = objectness >= box_threshold
+            boxes = box_convert(output['pred_boxes'][0][selected], 'cxcywh', 'xyxy')
+            boxes *= torch.tensor([width, height, width, height], device=self.device)
+            boxes[:, 0::2].clamp_(0, width)
+            boxes[:, 1::2].clamp_(0, height)
+            objectness = objectness[selected]
+            valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+            boxes, objectness = boxes[valid], objectness[valid]
+            keep = nms(boxes, objectness, box_nms_threshold)
+            boxes, objectness = boxes[keep], objectness[keep]
         if not len(boxes):
             return boxes, torch.empty((0, height, width), device=self.device, dtype=torch.bool), objectness
-        with torch.autocast('cuda', enabled=False):
-            # New Ultralytics uses quantize instead of half; both keep SAM in FP32.
-            # 新版 Ultralytics 以 quantize 替代 half；两种接口均保持 SAM 的 FP32 精度。
-            precision = {"quantize": 32} if "quantize" in DEFAULT_CFG_DICT else {"half": False}
-            result = self.segmentor.predict(np.ascontiguousarray(rgb[:, :, ::-1]), bboxes=boxes.cpu().numpy().tolist(),
-                                            device=self.device, verbose=False, save=False, **precision)[0]
-        masks = result.masks.data.bool()
-        if masks.shape != (len(boxes), height, width):
-            raise RuntimeError('SAM returned unexpected mask dimensions')
-        xs = torch.arange(width, device=self.device)[None, None, :]
-        ys = torch.arange(height, device=self.device)[None, :, None]
-        masks &= (xs >= boxes[:, 0, None, None]) & (xs < boxes[:, 2, None, None]) & (ys >= boxes[:, 1, None, None]) & (ys < boxes[:, 3, None, None])
-        valid = masks.flatten(1).any(1)
-        return boxes[valid], masks[valid], objectness[valid]
+        if not self.use_sam:
+            return boxes, bbox_regions(boxes, height, width), objectness
+        from ultralytics.cfg import DEFAULT_CFG_DICT
+        with ComponentTimer("SAM2", self.device):
+            with torch.autocast('cuda', enabled=False):
+                # New Ultralytics uses quantize instead of half; both keep SAM in FP32.
+                # 新版 Ultralytics 以 quantize 替代 half；两种接口均保持 SAM 的 FP32 精度。
+                precision = {"quantize": 32} if "quantize" in DEFAULT_CFG_DICT else {"half": False}
+                result = self.segmentor.predict(np.ascontiguousarray(rgb[:, :, ::-1]), bboxes=boxes.cpu().numpy().tolist(),
+                                                device=self.device, verbose=False, save=False, **precision)[0]
+            boxes, masks, objectness = align_sam_proposals(result, boxes, objectness, height, width)
+            xs = torch.arange(width, device=self.device)[None, None, :]
+            ys = torch.arange(height, device=self.device)[None, :, None]
+            masks &= (xs >= boxes[:, 0, None, None]) & (xs < boxes[:, 2, None, None]) & (ys >= boxes[:, 1, None, None]) & (ys < boxes[:, 3, None, None])
+            valid = masks.flatten(1).any(1)
+            boxes, masks, objectness = boxes[valid], masks[valid], objectness[valid]
+        return boxes, masks, objectness
 
 
 class TemplateMatcher:
@@ -2506,9 +2553,12 @@ class WAPRDet2D:
 
         直接调用写成 WAPRDet2D(template, ...)。
     """
-    def __init__(self, template, weights_dir=default_weights_dir, device='cuda:0', backend='trt', dino='vitl14', grounding='swinb'):
+    def __init__(self, template, weights_dir=default_weights_dir, device='cuda:0', backend='trt', dino='vitl14', grounding='swinb', use_sam=True):
         """
         # Unseen-object RGB 2D detection.
+
+            use_sam=False disables SAM and returns bbox-only instances without a mask field.
+            use_sam=False 时关闭 SAM，检测实例仅含框，不含 mask 字段。
 
             Load the weights, the CAD bank, the DINOv2 encoder, GroundingDINO, and SAM.
 
@@ -2568,9 +2618,11 @@ class WAPRDet2D:
         self.backend = backend
         self.dino = str(dino)
         self.grounding = str(grounding)
+        self.use_sam = use_sam
         self.weights_dir = os.path.abspath(os.fspath(weights_dir))
         started = time.perf_counter()
-        self.assets_identity = prepare_det2d_weights(self.weights_dir, dino=self.dino, grounding=self.grounding)
+        self.assets_identity = prepare_det2d_weights(self.weights_dir, dino=self.dino, grounding=self.grounding,
+                                                   use_sam=self.use_sam)
         if backend == 'trt':
             ensure_dino_engine(self.weights_dir, self.device, dino=self.dino)
         dino_path = os.path.join(self.weights_dir, DINO_CHOICES[self.dino]['file'])
@@ -2599,13 +2651,13 @@ class WAPRDet2D:
         self.matcher = TemplateMatcher(bank)
         with torch.cuda.device(self.device):
             self.encoder = DinoTRT(self.weights_dir, self.device, dino=self.dino) if backend == 'trt' else NativeDino(self.weights_dir, self.device, dino=self.dino)
-            self.proposals = GroundingSAM(self.weights_dir, self.device, grounding=self.grounding)
+            self.proposals = GroundingSAM(self.weights_dir, self.device, grounding=self.grounding, use_sam=self.use_sam)
         self.coordinates = (torch.arange(crop_px, device=self.device) + .5) / crop_px - .5
         torch.cuda.synchronize(self.device)
         self.loading_s = time.perf_counter() - started
         self.last_evidence = None
         print('WAPR_DET2D', {'backend': backend, 'dino': self.dino, 'grounding': self.grounding,
-                            'GD_SAM': 'FP32', 'obj_ids': obj_ids.tolist(),
+                            'GD_SAM': 'FP32' if self.use_sam else 'GroundingDINO FP32; SAM disabled', 'obj_ids': obj_ids.tolist(),
                             'views': bank['cls'].shape[1], 'crop_px': crop_px, 'crop_batch': crop_batch,
                             'global_views': global_views, 'matching_batch': matching_batch,
                             'gate': score_threshold, 'mask_NMS': mask_nms_threshold,
@@ -2640,7 +2692,7 @@ class WAPRDet2D:
         ## Args
 
             - rgb: uint8 HWC RGB, shape (H, W, 3). Any other array raises ValueError.
-            - profile: False by default. False does not add stage synchronizes. True synchronizes around proposal, encode, matching, and postprocess, and adds those times to timing.
+            - profile: False by default. Component timers always synchronize GroundingDINO, SAM2 and DINOv2. True additionally synchronizes matching and postprocess and adds stage times to timing.
             - obj_ids: a sequence of class ids, or None. None scores every class in the bank. An id that is not in the bank raises ValueError. Other classes are removed before the winning class is chosen.
             - score_min: the detection-score gate, or None.
             - confidence: the same score gate, or None. The name does not imply a calibrated probability. Both set to different numbers raises ValueError.
@@ -2684,8 +2736,8 @@ class WAPRDet2D:
 
             - rgb: uint8 HWC RGB，形状 (H, W, 3)。其他数组抛出 ValueError。
             - profile 默认是 False。
-            - False 不会为各阶段额外同步。
-            - True 会在候选、编码、匹配和后处理四周同步，并把这些时间写进 timing。
+            - GroundingDINO、SAM2 和 DINOv2 的终端计时始终同步 CUDA。
+            - True 还会同步匹配与后处理，并把各阶段时间写进 timing。
             - obj_ids: 类别 id 序列，或 None。None 对库里的每个类别打分。不在库里的 id 抛出 ValueError。其他类别会在选出获胜类别之前被去掉。
             - score_min: 检测分数阈值，或 None。
             - confidence: 同一个分数阈值，或 None。该名称不表示校准概率；两者都给出且数值不同会抛出 ValueError。
@@ -2703,7 +2755,8 @@ class WAPRDet2D:
             - mask_bbox: 由该 RLE 得到的像素 xywh。
 
 """
-        from pycocotools import mask as mask_utils
+        if self.use_sam:
+            from pycocotools import mask as mask_utils
 
         gate = detection_gate(score_min, confidence)
 
@@ -2721,14 +2774,15 @@ class WAPRDet2D:
             proposed = time.perf_counter()
             query = None
             if len(boxes):
-                image_array = np.ascontiguousarray(rgb) if rgb.flags.writeable else rgb.copy()
-                image = torch.from_numpy(image_array).to(self.device).permute(2, 0, 1).float() / 255
-                chunks = []
-                for start in range(0, len(boxes), crop_batch):
-                    crops, crop_masks = square_crops(image, masks[start:start + crop_batch], boxes[start:start + crop_batch], self.coordinates)
-                    crops = lift_black_queries(crops, crop_masks)
-                    chunks.append(self.encoder.encode(crops, crop_masks))
-                query = {key: torch.cat([row[key] for row in chunks]) for key in chunks[0]}
+                with ComponentTimer("DINOv2", self.device):
+                    image_array = np.ascontiguousarray(rgb) if rgb.flags.writeable else rgb.copy()
+                    image = torch.from_numpy(image_array).to(self.device).permute(2, 0, 1).float() / 255
+                    chunks = []
+                    for start in range(0, len(boxes), crop_batch):
+                        crops, crop_masks = square_crops(image, masks[start:start + crop_batch], boxes[start:start + crop_batch], self.coordinates)
+                        crops = lift_black_queries(crops, crop_masks)
+                        chunks.append(self.encoder.encode(crops, crop_masks))
+                    query = {key: torch.cat([row[key] for row in chunks]) for key in chunks[0]}
             if profile:
                 torch.cuda.synchronize(self.device)
             encoded = time.perf_counter()
@@ -2752,16 +2806,21 @@ class WAPRDet2D:
                     scores, self.matcher.bank['obj_ids'], masks, score_min=gate,
                 )
                 indices = torch.as_tensor(keep, device=self.device)
-                kept_masks = masks[indices].byte().cpu().numpy()
                 kept_boxes = boxes[indices].cpu().numpy()
                 if len(keep):
-                    rles = mask_utils.encode(np.asfortranarray(kept_masks.transpose(1, 2, 0)))
+                    rles = None
+                    if self.use_sam:
+                        kept_masks = masks[indices].byte().cpu().numpy()
+                        rles = mask_utils.encode(np.asfortranarray(kept_masks.transpose(1, 2, 0)))
                     for position, index in enumerate(keep):
-                        box, rle = kept_boxes[position], rles[position]
-                        instances.append({'obj_id': int(identities[index]), 'score_2d': float(confidence_values[index]),
-                                          'bbox': [float(box[0]), float(box[1]), float(box[2] - box[0]), float(box[3] - box[1])],
-                                          'mask': {'size': rle['size'], 'counts': rle['counts'].decode('ascii')},
-                                          'mask_bbox': mask_utils.toBbox(rle).tolist()})
+                        box = kept_boxes[position]
+                        instance = {'obj_id': int(identities[index]), 'score_2d': float(confidence_values[index]),
+                                    'bbox': [float(box[0]), float(box[1]), float(box[2] - box[0]), float(box[3] - box[1])]}
+                        if rles is not None:
+                            rle = rles[position]
+                            instance.update(mask={'size': rle['size'], 'counts': rle['counts'].decode('ascii')},
+                                            mask_bbox=mask_utils.toBbox(rle).tolist())
+                        instances.append(instance)
             if profile:
                 torch.cuda.synchronize(self.device)
         finished = time.perf_counter()
@@ -3044,7 +3103,7 @@ def encode_render_templates(renders, cache_path="", weights_dir=default_weights_
     return cache_path
 
 
-def onboard_meshes(meshes_m, cache_path="", weights_dir=default_weights_dir, device='cuda:0', dino='vitl14'):
+def onboard_meshes(meshes_m, cache_path="", weights_dir=default_weights_dir, device='cuda:0', dino='vitl14', cache_policy='error'):
     """
     # Render a CAD library and return its template bank.
 
@@ -3057,6 +3116,9 @@ def onboard_meshes(meshes_m, cache_path="", weights_dir=default_weights_dir, dev
         A matching cache returns the path without rendering again.
 
         A different existing cache raises ValueError and is not overwritten.
+
+        cache_policy='version' selects a new identity-specific path on mismatch, preserving the old cache.
+        cache_policy='version' 时为失效缓存选择新版本路径，并保留旧缓存。
 
         Rendering uses template_views, which is 42, focal length 224 pixels, principal point 112, and a camera distance of 1.5 times the bounds diagonal.
 
@@ -3128,17 +3190,12 @@ def onboard_meshes(meshes_m, cache_path="", weights_dir=default_weights_dir, dev
                     'lighting': [float(pose_recipe.w_ambient), float(pose_recipe.w_diffuse), list(pose_recipe.light_dir)],
                     'torch': torch.__version__, 'mesh_units': 'm', 'views': template_views,
                     'recipe': 'centered;diameter1.5;focal224;uint8;native AMP;rot4'}
+        from wapr.template_cache import select_cad_cache
+        cache_path, cache_hit = select_cad_cache(cache_path, identity, policy=cache_policy)
         mesh_manifest = cache_path + '.meshes.json'
-        if os.path.isfile(cache_path):
-            if os.path.isfile(mesh_manifest) and os.path.isfile(cache_path + '.json'):
-                with open(mesh_manifest) as stream:
-                    previous = json.load(stream)
-                with open(cache_path + '.json') as stream:
-                    bank_manifest = json.load(stream)
-                if previous == identity and bank_manifest['bank_sha256'] == sha256(cache_path):
-                    print('DET2D_CAD_CACHE_HIT', cache_path, flush=True)
-                    return cache_path
-            raise ValueError('Existing CAD cache has different inputs/code; choose a new cache path')
+        if cache_hit:
+            print('DET2D_CAD_CACHE_HIT', cache_path, flush=True)
+            return cache_path
     runtime = runtime_for(device)
     intrinsics = np.array([[224., 0, 112.], [0, 224., 112.], [0, 0, 1.]])
     renders = {}

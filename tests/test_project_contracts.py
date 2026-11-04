@@ -11,6 +11,30 @@ from wapr_realsense.app import parse_args
 from wapr_realsense.output import read_latest_pose, transform_to_base
 
 class ConfigurationTests(unittest.TestCase):
+    def test_optional_sam_boolean_config_and_cli_override(self):
+        self.assertTrue(parse_args([]).detect_use_sam)
+        self.assertFalse(parse_args(["--no-detect-use-sam"]).detect_use_sam)
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = Path(folder) / "config.json"
+            cfg.write_text(json.dumps({"init": "auto", "detect_use_sam": False}))
+            self.assertFalse(parse_args(["--config", str(cfg)]).detect_use_sam)
+            self.assertTrue(parse_args(["--config", str(cfg), "--detect-use-sam"]).detect_use_sam)
+            for bad in ["false", 0, None]:
+                cfg.write_text(json.dumps({"detect_use_sam": bad}))
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    parse_args(["--config", str(cfg)])
+
+    def test_timing_options_and_validation(self):
+        args = parse_args([])
+        self.assertEqual(args.timing_interval, 5.0)
+        self.assertFalse(args.log_poses)
+        args = parse_args(["--timing-interval", "2", "--log-poses"])
+        self.assertEqual(args.timing_interval, 2.0)
+        self.assertTrue(args.log_poses)
+        for interval in ("0", "-1", "nan", "inf"):
+            with self.subTest(interval=interval), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_args(["--timing-interval", interval])
+
     def test_relative_config_paths_and_explicit_cli_override(self):
         with tempfile.TemporaryDirectory() as folder:
             cfg = Path(folder) / "config.json"
@@ -30,6 +54,24 @@ class ConfigurationTests(unittest.TestCase):
                     parse_args(["--config", str(cfg)])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parse_args(["--no-display"])
+
+    def test_auto_config_headless_paths_and_cli_override(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = Path(folder) / "auto.json"
+            cfg.write_text(json.dumps({"init": "auto", "no_display": True,
+                                       "template_cache": "templates/target.pt", "detect_score": 0.3}))
+            args = parse_args(["--config", str(cfg), "--detect-score", "0.4"])
+            self.assertEqual(args.init, "auto")
+            self.assertEqual(args.template_cache, cfg.parent / "templates/target.pt")
+            self.assertEqual(args.detect_score, 0.4)
+
+    def test_auto_invalid_options(self):
+        cases = [["--detect-interval", "0"], ["--detect-interval", "nan"],
+                 ["--detect-score", "inf"], ["--detect-score", "1.1"],
+                 ["--init", "auto", "--bbox", "1", "1", "4", "4"]]
+        for case in cases:
+            with self.subTest(case=case), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_args(case)
 
 
 class RoboticsOutputTests(unittest.TestCase):

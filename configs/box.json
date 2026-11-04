@@ -3,6 +3,7 @@
   "mesh_unit": "m",
   "mesh_scale": 1.0,
   "backend": "trt",
+  "detect_use_sam": true,
   "width": 640,
   "height": 480,
   "fps": 15,

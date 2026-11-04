@@ -22,6 +22,7 @@ import time
 import numpy as np
 import torch
 
+from wapr.timing import TimingCollector, print_timing, timing_phase
 
 
 def _rgb_uint8(rgb):
@@ -203,7 +204,7 @@ def estimate_frame_many_categories_many_instances(
 
         The order is the class list, then the 2D score, then same-class mask NMS inside the detector, then the WBPS score, then the per-class count.
 
-        A detection without finite, positive depth under its mask stays in detections but cannot enter pose estimation.
+        A detection without finite, positive depth under its mask or bbox stays in detections but cannot enter pose estimation.
 
         WAPR, SAPR, and WBPS each run once over the remaining instances.
 
@@ -222,7 +223,7 @@ def estimate_frame_many_categories_many_instances(
         - rgb: HxWx3 RGB, uint8 or 0–1.
         - depth_m: HxW meters.
         - K: 3×3, pixels. A 3-channel depth keeps the first channel. Different rgb and depth sizes raise ValueError.
-        - meshes: obj_id to (mesh, diameter_m). diameter_m is meters. The visible mask selects wapr_w_mask. The detector bbox is not the pose region.
+        - meshes: obj_id to (mesh, diameter_m). diameter_m is meters. A visible mask selects wapr_w_mask; without a mask, the detector bbox selects wapr_wo_mask.
         - obj_ids: the class list. None uses the mesh ids that are also in the template bank. 2D matching and 6D estimation both stay inside that list. An allowed id missing from meshes raises KeyError.
 
     ## Returns
@@ -260,7 +261,7 @@ def estimate_frame_many_categories_many_instances(
 
         顺序是先类别，再 2D 分数，再检测器里的同类 mask NMS，再 WBPS 分数，再每个类别的数量。
 
-        mask 内没有有限正深度的检测仍保留在 detections 中，但不进入位姿估计。
+        mask 或 bbox 内没有有限正深度的检测仍保留在 detections 中，但不进入位姿估计。
 
         WAPR、SAPR、WBPS 对其余实例各执行一次。
 
@@ -282,7 +283,7 @@ def estimate_frame_many_categories_many_instances(
         - meshes 把 obj_id 映射到 (mesh, diameter_m)。
         - diameter_m 是米。
         - 可见 mask 选择 wapr_w_mask。
-        - 检测包围盒不用作位姿区域。
+        - 没有可见 mask 时，检测包围盒作为位姿区域，选择 wapr_wo_mask。
         - obj_ids: 类别名单。None 时用既在 meshes 里、也在模板库里的 id。2D 匹配和 6D 估计都只在这份名单里。名单里的 id 不在 meshes 中则抛出 KeyError。
 
     ## 返回
@@ -293,8 +294,6 @@ def estimate_frame_many_categories_many_instances(
         - detections: 通过 2D 阈值的检测行，包括没有可用深度的行，还没经过 score_6d_min 和 inst_count。每行有 obj_id、score_2d、bbox、mask。visualize_2d_detection 画出蓝色二维框和带颜色的 mask。visualize_6d_pose 画出红色 6D 框和渲染轮廓。
 
 """
-    from pycocotools import mask as mask_utils
-
     rgb_u8 = _rgb_uint8(rgb)
     depth = np.asarray(depth_m, dtype=np.float32)
     if depth.ndim == 3:
@@ -326,17 +325,19 @@ def estimate_frame_many_categories_many_instances(
     if not getattr(detector, "_frame_detector_warmed", False):
         torch.cuda.synchronize(estimator.device)
         warm_started = time.perf_counter()
-        for _ in range(3):
-            detector.detect_many_categories_many_instances(rgb_u8, obj_ids=allowed, score_min=score_2d_min)
+        with timing_phase("warmup"), TimingCollector() as warmup:
+            for _ in range(3):
+                detector.detect_many_categories_many_instances(rgb_u8, obj_ids=allowed, score_min=score_2d_min)
         torch.cuda.synchronize(estimator.device)
         detector_warmup_seconds = time.perf_counter() - warm_started
         detector._frame_detector_warmed = True
+        warmup.report_warmup(detector_warmup_seconds * 1000)
     torch.cuda.synchronize(estimator.device)
     frame_started = time.perf_counter()
     instances, timing = detector.detect_many_categories_many_instances(rgb_u8, obj_ids=allowed, score_min=score_2d_min)
-    # A pose requires at least one valid depth pixel inside its visible mask.
+    # A pose requires at least one valid depth pixel inside its mask or bbox.
     # Preserve the 2D rows so the detection and pose stages remain inspectable.
-    # 位姿至少需要一个落在可见 mask 内的有效深度像素；原始 2D 行仍保留供检查。
+    # 位姿至少需要一个落在 mask 或 bbox 内的有效深度像素；原始 2D 行仍保留供检查。
     valid_depth = np.isfinite(depth) & (depth > 0)
     skipped_no_depth = 0
     items = []
@@ -346,17 +347,31 @@ def estimate_frame_many_categories_many_instances(
         if obj_id not in meshes:
             raise KeyError("obj_id %d is not in meshes" % obj_id)
         mesh, diameter_m = meshes[obj_id]
-        visible = np.asarray(mask_utils.decode(instance["mask"]))
-        if visible.ndim == 3:
-            visible = visible[..., 0]
-        if visible.shape[:2] != rgb_u8.shape[:2]:
-            raise ValueError("mask size differs from rgb")
-        if not np.any((visible > 0) & valid_depth):
+        item = {"mesh": mesh, "diameter_m": float(diameter_m)}
+        if instance.get("mask") is not None:
+            from pycocotools import mask as mask_utils
+            visible = np.asarray(mask_utils.decode(instance["mask"]))
+            if visible.ndim == 3:
+                visible = visible[..., 0]
+            if visible.shape[:2] != rgb_u8.shape[:2]:
+                raise ValueError("mask size differs from rgb")
+            has_depth = np.any((visible > 0) & valid_depth)
+            item["mask"] = visible
+        else:
+            bbox = np.asarray(instance["bbox"], dtype=np.float64)
+            if bbox.shape != (4,) or not np.isfinite(bbox).all() or np.any(bbox[2:] <= 0):
+                raise ValueError("bbox must be finite xywh with positive width and height")
+            x, y, w, h = bbox
+            height, width = depth.shape[:2]
+            x0, y0 = max(int(np.floor(x)), 0), max(int(np.floor(y)), 0)
+            x1, y1 = min(int(np.ceil(x + w)), width), min(int(np.ceil(y + h)), height)
+            has_depth = x1 > x0 and y1 > y0 and np.any(valid_depth[y0:y1, x0:x1])
+            item["bbox_xywh"] = bbox.tolist()
+        if not has_depth:
             skipped_no_depth += 1
             continue
-        # The visible mask is the pose region. bbox stays the detector bbox.
-        # 可见 mask 是位姿区域。bbox 仍是检测包围盒。
-        items.append({"mesh": mesh, "diameter_m": float(diameter_m), "mask": visible})
+        # No mask selects the estimator's existing wapr_wo_mask bbox route.
+        items.append(item)
         field = {
             "obj_id": obj_id,
             "score_2d": float(instance["score_2d"]),
@@ -380,14 +395,17 @@ def estimate_frame_many_categories_many_instances(
         item["mesh"] = mesh
     warmup_seconds = 0.0
     if items and not getattr(estimator, "_frame_pose_warmed", False):
-        warmup_seconds = estimator.warmup_pose(rgb_u8, depth, K, items, n_view=n_view, n_inplane=n_inplane)
+        print_timing("WARMUP", f"WAPR initialization started | calls=3 | candidates={len(items)}")
+        warmup_seconds = estimator.warmup_pose(rgb_u8, depth, K, items, n_view=n_view, n_inplane=n_inplane, calls=3)
         estimator._frame_pose_warmed = True
+        print_timing("WARMUP", f"WAPR initialization: total={warmup_seconds * 1000:.2f} ms | avg={warmup_seconds * 1000 / 3:.2f} ms | calls=3")
     torch.cuda.synchronize(estimator.device)
     started = time.perf_counter()
     estimated = estimator.estimate_many_categories_many_instances(rgb_u8, depth, K, items, n_view=n_view, n_inplane=n_inplane)
     torch.cuda.synchronize(estimator.device)
     elapsed_s = time.perf_counter() - started
     timing["pose_hot_seconds"] = elapsed_s
+    timing["pose_candidates"] = len(items)
     timing["pose_warmup_seconds"] = warmup_seconds
     timing["mesh_setup_seconds"] = mesh_setup_seconds
     timing["detector_warmup_seconds"] = detector_warmup_seconds

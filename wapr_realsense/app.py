@@ -1,4 +1,4 @@
-"""RealSense RGB-D to a single object's 6D pose: select ROI once, then track."""
+"""RealSense RGB-D to a single object's 6D pose: initialize, then track."""
 
 import argparse
 from datetime import datetime
@@ -10,10 +10,13 @@ import time
 import cv2
 import numpy as np
 
+from wapr.timing import ComponentTimer, TrackingTiming, print_timing
+
 from .camera import RGBDFrame, RealSenseCamera
 from .geometry import check_bbox, draw_pose, load_mesh
 from .output import PoseWriter, pose_record, save_snapshot
 from .tracker import PoseSession
+from .initialization import build_initializer
 
 def parse_args(argv=None):
     pre = argparse.ArgumentParser(add_help=False)
@@ -24,7 +27,16 @@ def parse_args(argv=None):
     parser.add_argument("--mesh-unit", choices=["m", "mm", "cm"], default="m")
     parser.add_argument("--mesh-scale", type=float, default=1.0)
     parser.add_argument("--backend", choices=["trt", "torch"], default="trt")
-    parser.add_argument("--init", choices=["roi"], default="roi", help="ROI initialization; retained for old commands")
+    parser.add_argument("--init", choices=["roi", "auto"], default="roi",
+                        help="Manual ROI (default) or GroundingDINO/SAM2/DINOv2 CAD detection")
+    parser.add_argument("--detect-interval", type=float, default=1.0, help="Seconds between unsuccessful auto searches")
+    parser.add_argument("--detect-score", type=float, default=0.1, help="2D template-match score gate (0 to 1)")
+    parser.add_argument("--detect-backend", choices=["trt", "torch"], default="trt", help="DINOv2 encoder backend")
+    parser.add_argument("--detect-dino", choices=["vits14", "vitb14", "vitl14"], default="vitl14")
+    parser.add_argument("--detect-grounding", choices=["swint", "swinb"], default="swinb")
+    parser.add_argument("--detect-use-sam", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use SAM2 masks; --no-detect-use-sam uses bounding boxes")
+    parser.add_argument("--template-cache", type=Path, help="Optional CAD template .pt cache; otherwise kept in GPU memory")
     parser.add_argument("--serial", help="Select a camera by serial number")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -34,6 +46,8 @@ def parse_args(argv=None):
     parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--print-every", type=int, default=10)
+    parser.add_argument("--log-poses", action="store_true", help="Also print verbose POSE_JSON records; files always contain every frame")
+    parser.add_argument("--timing-interval", type=float, default=5.0, help="Seconds between tracking mean-time summaries")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--camera-frame", default="color_optical_frame")
     parser.add_argument("--object-frame", default="target_object")
@@ -52,7 +66,7 @@ def parse_args(argv=None):
                 parser.error("Unknown configuration field: %s" % name)
             action = actions[name]
             if value is None:
-                if name not in ("serial", "bbox", "output", "replay"):
+                if name not in ("serial", "bbox", "output", "replay", "template_cache"):
                     parser.error("Configuration field %s cannot be null" % name)
             elif action.type is Path:
                 if not isinstance(value, str):
@@ -85,13 +99,36 @@ def parse_args(argv=None):
         parser.error("--max-frames must be nonnegative")
     if not args.camera_frame.strip() or not args.object_frame.strip():
         parser.error("Frame names cannot be empty")
-    if args.no_display and args.bbox is None and not args.replay and not args.check_camera:
+    if not np.isfinite(args.detect_interval) or args.detect_interval <= 0:
+        parser.error("--detect-interval must be finite and positive")
+    if not np.isfinite(args.detect_score) or not 0 <= args.detect_score <= 1:
+        parser.error("--detect-score must be between 0 and 1")
+    if not np.isfinite(args.timing_interval) or args.timing_interval <= 0:
+        parser.error("--timing-interval must be finite and positive")
+    if args.init == "auto" and args.bbox is not None:
+        parser.error("--bbox is only supported with --init roi")
+    if args.init == "roi" and args.no_display and args.bbox is None and not args.replay and not args.check_camera:
         parser.error("Headless tracking requires --bbox X Y W H")
     return args
 
-def replay(args, session, mesh, output, writer):
+def timed_step(session, frame, bbox=None, tracking_timing=None):
+    """Measure one pose step, reporting tracking attempts even if they are rejected."""
+    tracking = session.pose is not None and bbox is None
+    if not tracking and tracking_timing is not None:
+        tracking_timing.flush()
+    with ComponentTimer(None, session.estimator.device) as timer:
+        status, row = session.step(frame, bbox=bbox)
+    if tracking and tracking_timing is not None:
+        tracking_timing.add(timer.elapsed_ms)
+        if status == "lost":
+            tracking_timing.flush()
+    elif bbox is not None:
+        print_timing("INIT", f"WAPR initialization={timer.elapsed_ms:.2f} ms | result={status}")
+    return status, row, timer.elapsed_ms
+
+
+def replay(args, session, mesh, output, writer, tracking_timing=None):
     """Exercise estimation and one real tracking update with a saved RGB-D frame."""
-    import torch
     folder = args.replay
     bgr = cv2.imread(str(folder / "rgb.png"))
     if bgr is None:
@@ -114,15 +151,13 @@ def replay(args, session, mesh, output, writer):
     for index in range(args.max_frames or 2):
         frame.number = index
         frame.received_monotonic = time.monotonic()
-        torch.cuda.synchronize()
-        started = time.monotonic()
-        status, row = session.step(frame, started, bbox=bbox if index == 0 else None)
-        torch.cuda.synchronize()
-        ms = (time.monotonic() - started) * 1000
+        status, row, ms = timed_step(session, frame, bbox=bbox if index == 0 else None,
+                                    tracking_timing=tracking_timing)
         record = pose_record(frame, status, row, ms, args.mesh, args.camera_frame, args.object_frame)
         writer.write(record)
         preview = draw_pose(frame, mesh, row, status, ms)
-        print("POSE_JSON", json.dumps(record, allow_nan=False), flush=True)
+        if args.log_poses and index % args.print_every == 0:
+            print("POSE_JSON", json.dumps(record, allow_nan=False), flush=True)
         if not cv2.imwrite(str(output / "replay_pose.jpg"), preview):
             raise OSError("Could not write replay preview")
     return frame
@@ -158,18 +193,26 @@ def main(argv=None):
                         "diameter_m": diameter, "unit": args.mesh_unit, "scale": args.mesh_scale}, flush=True)
     estimator = WAPREstimator(device="cuda:0")
     prepared = estimator.prepare_meshes([mesh])[0]
-    session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score)
     output = args.output or Path.cwd() / "outputs" / "wapr_realsense" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     writer = PoseWriter(output)
     (output / "session.json").write_text(json.dumps({"mesh": str(args.mesh.resolve()), "mesh_unit": args.mesh_unit,
         "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend, "init": args.init,
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
+        "automatic_detection": None if args.init == "roi" else {
+            "interval_s": args.detect_interval, "score_2d_min": args.detect_score,
+            "dino": args.detect_dino, "grounding": args.detect_grounding, "backend": args.detect_backend,
+            "use_sam": args.detect_use_sam,
+            "template_cache": None if args.template_cache is None else str(args.template_cache.resolve())},
         "pose_convention": "original_scaled_mesh_to_color_optical_frame"}, indent=2))
     print("LIVE_OUTPUT", output, flush=True)
     last_frame = None
+    tracking_timing = TrackingTiming(args.timing_interval)
     try:
+        initializer = build_initializer(args, estimator, mesh, prepared, diameter)
+        session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
+                              initializer=initializer, detect_interval=args.detect_interval)
         if args.replay:
-            last_frame = replay(args, session, mesh, output, writer)
+            last_frame = replay(args, session, mesh, output, writer, tracking_timing)
             return
         with RealSenseCamera(args.width, args.height, args.fps, args.serial) as camera:
             (output / "camera.json").write_text(json.dumps(dict(camera.info, pose_frame=args.camera_frame), indent=2))
@@ -199,14 +242,10 @@ def main(argv=None):
                         except ValueError as error:
                             print("ROI_REJECTED", str(error), flush=True)
                             bbox = None
-                torch.cuda.synchronize()
-                started = time.monotonic()
-                status, row = session.step(frame, started, bbox=bbox)
-                torch.cuda.synchronize()
-                processing_ms = (time.monotonic() - started) * 1000
+                status, row, processing_ms = timed_step(session, frame, bbox=bbox, tracking_timing=tracking_timing)
                 record = pose_record(frame, status, row, processing_ms, args.mesh, args.camera_frame, args.object_frame)
                 writer.write(record)
-                if count % args.print_every == 0:
+                if args.log_poses and count % args.print_every == 0:
                     print("POSE_JSON", json.dumps(record, allow_nan=False), flush=True)
                 count += 1
                 if not args.no_display:
@@ -221,6 +260,7 @@ def main(argv=None):
                     if key == ord("s"):
                         save_snapshot(output, frame, preview, record)
     finally:
+        tracking_timing.flush()
         if last_frame is not None:
             writer.write(pose_record(last_frame, "stopped", None, 0.0, args.mesh, args.camera_frame, args.object_frame))
         writer.close()

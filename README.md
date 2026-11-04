@@ -3,17 +3,17 @@
 [中文](README.zh-CN.md)
 
 RealSense RGB-D → one object's 6D pose, powered by [WAPR](https://github.com/WangYuLin-SEU/WAPR).
-Select the object once, then track it continuously and publish its pose in the color-camera frame.
+Initialize by manual selection or optional automatic detection, then track and publish its pose in the color-camera frame.
 The application targets robotics workflows with one known metric mesh and one object instance.
 
 - RealSense D455 depth-to-color alignment, sensor-derived meter scale and pinhole rectification.
-- Manual ROI initialization, existing WAPR/SAPR refinement and WBPS candidate scoring.
-- TensorRT by default; no DINOv2, SAM2 or GroundingDINO models in the application path.
+- Manual ROI or optional GroundingDINO → SAM2 → DINOv2 CAD-template initialization.
+- TensorRT by default; ROI mode does not load detection models.
 - Live 3D box/axes, atomic `latest.json`, per-frame JSONL and RGB-D snapshots.
 - Configurable frame names, `R`, translation in meters and quaternion in `xyzw` order.
 
-This application tracks an initialized target. It does not automatically find or reacquire objects.
-Press `r` to select the target again after a loss. A matching metric mesh is required.
+ROI mode requires selection again after loss (`r`). Auto mode searches at startup and after a rejected
+tracking update; `r` restarts the search. A matching metric mesh is required in both modes.
 
 ## Quick start
 
@@ -53,17 +53,97 @@ Use another mesh without a config:
 python -m wapr_realsense --mesh /absolute/path/model.obj --mesh-unit m --backend trt
 ```
 
-Headless operation requires an initial ROI in rectified color-image pixels:
+Headless ROI operation requires an initial box in rectified color-image pixels:
 
 ```bash
 python -m wapr_realsense --config configs/box.json --no-display --bbox 180 100 280 300
 ```
+
+## Optional automatic initialization
+
+```bash
+python -m wapr_realsense --config configs/box.auto.json
+# Or enable it for any existing target configuration, including headless operation:
+python -m wapr_realsense --config configs/box.json --init auto --no-display
+```
+
+Auto mode uses the existing WAPR detector: GroundingDINO proposes boxes, SAM2 segments them,
+and DINOv2 matches candidates against rendered views of the configured mesh. WAPR estimates
+poses from the detected masks; the highest `score_6d` candidate passing `--min-score` is selected.
+No reference photo is used. Multiple identical instances cannot be distinguished by physical identity.
+Only search frames run detection; accepted poses use the existing six-candidate tracker.
+
+Configuration fields (also available as hyphenated CLI flags):
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `init` | `roi` | `auto` enables CAD-template detection |
+| `detect_interval` | `1.0` | Seconds after a failed search completes before the next attempt |
+| `detect_score` | `0.1` | 2D template-match acceptance gate, separate from `min_score` |
+| `detect_backend` | `trt` | DINOv2 encoder backend; `torch` also supported |
+| `detect_dino` | `vitl14` | `vits14`, `vitb14` or `vitl14` |
+| `detect_grounding` | `swinb` | `swint` or `swinb` |
+| `detect_use_sam` | `true` | Use SAM2 segmentation; `false` uses bbox regions for matching and bbox input for WAPR |
+| `template_cache` | unset | Optional `.pt` cache; unset builds templates in GPU memory each run |
+
+To disable SAM2, add `"detect_use_sam": false` to the JSON config, or use:
+
+```bash
+python -m wapr_realsense --config configs/box.json --init auto --no-detect-use-sam
+```
+
+This skips SAM2 model loading, inference and checkpoint downloads. GroundingDINO and DINOv2
+still run. Rectangle regions support DINO cropping and duplicate suppression; the pose estimator
+receives `bbox_xywh` without a mask and uses `wapr_wo_mask`. More background may enter matching
+and depth initialization, so detection scores and accuracy should be checked again. SAM2 timing
+is shown as `skipped`. Use `--detect-use-sam` to override a disabled config.
+
+Auto mode prepares optional detector dependencies and downloads missing weights on first use;
+the pose-only setup script does not preload them. The DINO TensorRT backend builds its engine
+when needed; GroundingDINO and SAM2 remain FP32. Expect additional startup time and GPU memory.
+An incompatible environment is reported by the existing optional-dependency bootstrap.
+The sample cache is relative to its JSON file, under `.wapr_runtime/templates/` rather than
+`.wapr_runtime/cache/`. Mesh/texture, encoder or source changes can invalidate the cache.
+The application automatically selects a versioned sibling path, rebuilds once and reuses it on later
+runs; old files are preserved. `DET2D_CAD_CACHE_CHANGED` prints the selected path. No directory
+deletion is needed. Setting `template_cache` to `null` disables the disk template cache.
+
+Output status is `searching` with `valid=false` until initialization succeeds, then `initialized_auto`
+and `tracking`. A rejected track emits `lost` without a pose, followed by a new search on the next frame.
+Passing scores do not detect every drift or guarantee the selected object's identity.
+The first call includes three detector warmup passes and pose warmup;
+use later searches when assessing recovery latency. Search runs synchronously and pauses pose output.
+
+The terminal displays three groups in milliseconds:
+
+- **Yellow `[WARMUP]`**: after the initial detector warmup, reports total time, average time
+  and call count for GroundingDINO, SAM2 and DINOv2. The first valid candidate batch also
+  reports total and average time for WAPR pose initialization warmup.
+- **Green `[TRACKING]`**: reports WAPR mean time and frame count every 5 seconds by default.
+  Loss, reinitialization and exit flush any remaining samples. Only tracking updates are
+  included, including rejected updates and first-call overhead. Set `--timing-interval 2`
+  to change the reporting interval.
+- **Cyan `[INIT]` / `[REINIT]`**: announces the first search and subsequent searches, then
+  reports GroundingDINO, SAM2, DINOv2 and WAPR pose initialization times, detection total,
+  complete initialization total, candidate counts and search result. The first complete total
+  includes warmup; later searches reuse completed warmup. Stages that do not run show `skipped`.
+
+GroundingDINO includes image preprocessing, inference and box filtering; SAM2 includes segmentation
+and mask postprocessing. DINOv2 includes proposal crop preprocessing and encoding across all batches,
+excluding template matching. Detection total also includes matching and postprocessing. WAPR tracking
+includes the complete update and validity check; pose initialization evaluates all valid candidates
+before selecting a target. Values are wall-clock milliseconds including CPU work and GPU waits,
+with CUDA synchronized before and after each stage. These extra synchronizations can affect stage
+overlap. Colors are enabled automatically in a terminal; redirected output or `NO_COLOR=1` uses plain text.
 
 ## Pose output
 
 The box config writes `outputs/box/latest.json`, `poses.jsonl`, `camera.json` and `session.json`.
 `latest.json` is replaced atomically. Invalid/stopped records contain `valid=false` and no pose.
 The reader checks validity and freshness, rejecting data older than 500 ms by default (`--max-age-ms`).
+Complete JSON records are saved for every frame. The terminal shows compact timing by default;
+add `--log-poses` to also print `POSE_JSON` every ten processed frames, or combine it with
+`--print-every 1` to print every frame.
 
 ```bash
 python examples/read_pose.py --input outputs/box/latest.json
@@ -93,13 +173,15 @@ assets/meshes/   local object assets, excluded from Git
 ```
 
 Environments, caches, weights, engines and local meshes are excluded by `.gitignore`.
-Detection and SAM sources are retained for optional use; the ROI tracking application does not load them.
+Detection and SAM sources support auto mode; ROI mode does not load them.
 
 ## Validation and deployment status
 
 - D455 640×480/15 Hz capture and TensorRT initialization/tracking were exercised on the desktop.
 - The operator reported good results using the local box and ROI workflow before this reorganization.
 - CPU tests cover depth conversion/rectification, configuration, loss state and robotics-output contracts.
+- Auto-mode tests cover CLI/replay wiring, retry timing, candidate selection and reacquisition with
+  mocked inference. Real three-model detection, startup memory and live auto-mode accuracy remain unverified.
 - Validation currently covers only the desktop setup above.
 - The backend's general engine profiles and model loading are unchanged; this is not yet the proposed
   single-target low-memory engine optimization.
