@@ -1,6 +1,5 @@
 import contextlib
 import io
-import importlib.util
 import json
 from pathlib import Path
 import tempfile
@@ -10,13 +9,6 @@ import numpy as np
 
 from wapr_realsense.app import parse_args
 from wapr_realsense.output import read_latest_pose, transform_to_base
-
-_root = Path(__file__).resolve().parents[1]
-_spec = importlib.util.spec_from_file_location("local_source_export", _root / "scripts/export_source.py")
-_exporter = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_exporter)
-export_source = _exporter.export_source
-
 
 class ConfigurationTests(unittest.TestCase):
     def test_relative_config_paths_and_explicit_cli_override(self):
@@ -72,23 +64,6 @@ class RoboticsOutputTests(unittest.TestCase):
         calibration["camera_frame"] = "different_camera"
         with self.assertRaisesRegex(ValueError, "camera_frame"):
             transform_to_base(self.record(), calibration)
-
-
-class SourceExportTests(unittest.TestCase):
-    def test_clean_export_preserves_notices_and_excludes_runtime_and_mesh(self):
-        with tempfile.TemporaryDirectory() as folder:
-            destination = export_source(Path(folder) / "WAPR-realsense")
-            self.assertTrue((destination / "wapr_realsense/app.py").is_file())
-            self.assertTrue((destination / "LICENSE").is_file())
-            self.assertTrue((destination / "UPSTREAM.md").is_file())
-            self.assertTrue((destination / "wapr/weight_license/WEIGHTS_LICENSE.txt").is_file())
-            for unwanted in [".git", ".venv", ".wapr_runtime", "outputs", "wheel_build", ".github/workflows/release.yml",
-                             "assets/meshes/box", "examples/01_one_rgb_detect_segment.py"]:
-                self.assertFalse((destination / unwanted).exists(), unwanted)
-            files = json.loads((destination / "SOURCE_MANIFEST.json").read_text())["files_sha256"]
-            self.assertIn("wapr_realsense/camera.py", files)
-            with self.assertRaises(FileExistsError):
-                export_source(destination)
 
 
 if __name__ == "__main__":

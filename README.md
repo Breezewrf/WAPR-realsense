@@ -1,6 +1,6 @@
 # WAPR-realsense
 
-[中文](README.zh-CN.md) · [Install](docs/install.md) · [Robot interface](docs/robotics.md) · [Jetson](docs/jetson.md)
+[中文](README.zh-CN.md)
 
 RealSense RGB-D → one object's 6D pose, powered by [WAPR](https://github.com/WangYuLin-SEU/WAPR).
 Select the object once, then track it continuously and publish its pose in the color-camera frame.
@@ -17,11 +17,8 @@ Press `r` to select the target again after a loss. A matching metric mesh is req
 
 ## Quick start
 
-Use Linux, Python 3.10+, an NVIDIA GPU, CUDA-enabled PyTorch and TensorRT 10.x.
-Prepare the target-specific GPU stack first; desktop wheels and Jetson packages are not interchangeable.
-See [installation](docs/install.md) for a fresh environment.
-
-For the existing prepared environment, from this directory:
+The exercised setup is Linux, Python 3.10, an RTX 4090 Laptop GPU and a RealSense D455.
+From the repository root:
 
 ```bash
 uv sync
@@ -30,6 +27,16 @@ export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python -m wapr_realsense --check-camera
 python -m wapr_realsense --config configs/box.json
 ```
+
+On first use, prepare the system CUDA toolkit, C++ compiler and EGL/GL development headers, then run:
+
+```bash
+python scripts/setup_runtime.py
+python -m wapr.export_engines
+```
+
+`uv sync` installs Python dependencies; these steps prepare weights, the renderer and local TensorRT engines.
+With a working cache, run the application directly.
 
 `configs/box.json` references the operator's local mesh at
 `assets/meshes/box/textured_mesh_modified.obj`. Supply your mesh at that path or edit
@@ -56,7 +63,7 @@ python -m wapr_realsense --config configs/box.json --no-display --bbox 180 100 2
 
 The box config writes `outputs/box/latest.json`, `poses.jsonl`, `camera.json` and `session.json`.
 `latest.json` is replaced atomically. Invalid/stopped records contain `valid=false` and no pose.
-Consumers should also reject stale records; see [the complete interface](docs/robotics.md).
+The reader checks validity and freshness, rejecting data older than 500 ms by default (`--max-age-ms`).
 
 ```bash
 python examples/read_pose.py --input outputs/box/latest.json
@@ -77,25 +84,23 @@ scale mismatch can cause drift or incorrect poses even when a score passes the g
 
 ```text
 wapr_realsense/  camera, tracking session, CLI, geometry and robotics output
-wapr/            vendored WAPR inference/backend sources and original notices
+wapr/            WAPR inference, optional detection/SAM modules and original notices
 configs/         single-target and camera-calibration templates
-examples/        live compatibility launcher and robot-side reader
-scripts/         pose-only setup and clean GitHub source export
-docs/            installation, output contract, Jetson and publication notes
+examples/        robot-side pose reader
+scripts/         pose runtime setup
 tests/           CPU contract tests; optional SDK geometry test
-assets/meshes/   local object assets, excluded from Git/source exports
+assets/meshes/   local object assets, excluded from Git
 ```
 
-The working checkout retains upstream research examples and wheel tooling for reference.
-The [clean source export](docs/publish.md) includes only the application examples and its CPU CI,
-without the upstream PyPI release workflow, environment, caches, weights, engines or local meshes.
+Environments, caches, weights, engines and local meshes are excluded by `.gitignore`.
+Detection and SAM sources are retained for optional use; the ROI tracking application does not load them.
 
 ## Validation and deployment status
 
 - D455 640×480/15 Hz capture and TensorRT initialization/tracking were exercised on the desktop.
 - The operator reported good results using the local box and ROI workflow before this reorganization.
 - CPU tests cover depth conversion/rectification, configuration, loss state and robotics-output contracts.
-- Jetson Orin NX deployment, peak memory and frame rate have not been validated.
+- Validation currently covers only the desktop setup above.
 - The backend's general engine profiles and model loading are unchanged; this is not yet the proposed
   single-target low-memory engine optimization.
 
@@ -104,7 +109,8 @@ Run tests with `python -B -m unittest discover -s tests -v`.
 ## Attribution and license
 
 WAPR-realsense is an application adaptation of WAPR, not an official upstream release.
-See [UPSTREAM.md](UPSTREAM.md) for the source commit, changes and paper citation.
+The inference core derives from WAPR commit `f165cec8ebdd48ae6f46d06a46c40d796ab80b71`.
+This application adds RealSense acquisition and a live pose interface while retaining the upstream backend modules.
 Source retains [LGPL-2.1-only](LICENSE); model weights retain their separate
 [weight license](WEIGHTS_LICENSE.txt). Preserve [authors](AUTHORS.md),
 [third-party notices](THIRD_PARTY_NOTICES.txt) and bundled license files.

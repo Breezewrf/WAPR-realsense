@@ -19,5 +19,3 @@ jobs:
         run: python -m pip install numpy scipy trimesh pillow opencv-python-headless
       - name: Test configuration, geometry and output contracts
         run: python -B -m unittest discover -s tests -v
-      - name: Verify clean source export
-        run: python scripts/export_source.py /tmp/WAPR-realsense-check

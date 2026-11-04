@@ -49,7 +49,7 @@ wapr = [
 ]
 
 [tool.setuptools]
-license-files = ["LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "UPSTREAM.md"]
+license-files = ["LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt", "THIRD_PARTY_NOTICES.txt"]
 
 # Match the CUDA 12.6 desktop stack used by this project.
 [[tool.uv.index]]
