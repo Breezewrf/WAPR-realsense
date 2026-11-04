@@ -328,6 +328,17 @@ def _tensorrt_requirements(cuda_major):
     return requirements
 
 
+def _check_torch_version(loaded_version):
+    """Compare complete PEP 440 versions, including NVIDIA's local build label."""
+    from importlib import metadata
+    from packaging.version import Version
+    installed_version = metadata.version("torch")
+    if Version(installed_version) != Version(str(loaded_version)):
+        raise RuntimeError(
+            "Restart Python after a PyTorch replacement / PyTorch 已更换，请重启 Python"
+            " (loaded=%s, installed=%s)" % (loaded_version, installed_version))
+
+
 def prepare_runtime(allow_replacement=None):
     """Install missing pose dependencies and compile for the existing CUDA.
 
@@ -424,8 +435,7 @@ def prepare_runtime(allow_replacement=None):
                 raise RuntimeError("Install system prerequisites / 请安装系统前置依赖: " + " ".join(system_packages))
             subprocess.check_call(["apt-get", "update"])
             subprocess.check_call(["apt-get", "install", "-y"] + system_packages)
-    if metadata.version("torch") != original_torch:
-        raise RuntimeError("Restart Python after an approved PyTorch replacement / 同意更换 PyTorch 后，请重启 Python 再准备运行环境")
+    _check_torch_version(original_torch)
     if renderer == "ogl":
         from wapr.ogl import ensure_ogl
         ensure_ogl()

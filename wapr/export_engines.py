@@ -26,7 +26,7 @@ from wapr import recipe
 from wapr.model_metadata import checkpoint_metadata, write_onnx_metadata, read_onnx_metadata, pack_engine
 from wapr.nets import load_net
 from wapr.pose_groups import wbps_group_sizes
-from wapr.trt_compat import network_flags, workspace_bytes
+from wapr.trt_compat import network_flags, workspace_bytes, onnx_opset_limit, parser_error_message
 
 
 def _onnx_unflatten(graph, tensor, axis, sizes):
@@ -115,10 +115,10 @@ def _onnx_scaled_dot_product_attention(graph, query, key, value, mask=None,
     return graph.op("MatMul", probabilities, value)
 
 
-def onnx_export_options():
-    """Keep the legacy exporter and derive an opset supported by this torch.
+def onnx_export_options(tensorrt_version=None):
+    """Keep the legacy exporter and match the torch and TensorRT opset limits.
 
-    保留同一追踪导出器，按当前 torch 支持的最高版本确定 ONNX opset。
+    保留同一追踪导出器，同时匹配 torch 和 TensorRT 支持的 ONNX opset。
     """
     try:
         from torch.onnx import _constants
@@ -126,7 +126,7 @@ def onnx_export_options():
     except (ImportError, AttributeError):
         from torch.onnx import symbolic_helper
         maximum_opset = int(symbolic_helper._onnx_main_opset)
-    options = {"opset_version": min(17, maximum_opset)}
+    options = {"opset_version": min(onnx_opset_limit(tensorrt_version), maximum_opset)}
     # Query the exporter registry before adding missing standard-operator mappings.
     # 先查导出注册表，仅补缺失算子的标准 ONNX 表达；不修改网络或 PyTorch forward。
     try:
@@ -151,7 +151,7 @@ def onnx_export_options():
         print("WAPR_ONNX_COMPAT", "aten::scaled_dot_product_attention -> MatMul/Softmax/MatMul", flush=True)
     if "dynamo" in inspect.signature(torch.onnx.export).parameters:
         options["dynamo"] = False
-    print("WAPR_ONNX_EXPORT", {"torch": torch.__version__, **options}, flush=True)
+    print("WAPR_ONNX_EXPORT", {"torch": torch.__version__, "tensorrt": tensorrt_version, **options}, flush=True)
     return options
 
 
@@ -406,7 +406,7 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
     network = builder.create_network(network_flags(trt))
     parser = trt.OnnxParser(network, logger)
     if not parser.parse(Path(onnx_path).read_bytes()):
-        raise RuntimeError("\n".join(str(parser.get_error(i)) for i in range(parser.num_errors)))
+        raise RuntimeError(parser_error_message(parser, onnx_path))
     profile = builder.create_optimization_profile()
     profile.set_shape("A", tuple(min_shape), tuple(opt_shape), tuple(max_shape))
     profile.set_shape("B", tuple(min_shape), tuple(opt_shape), tuple(max_shape))
@@ -456,8 +456,9 @@ def main():
 
         - 返回 None。
     """
+    import tensorrt as trt
     device = "cuda:0"
-    export_options = onnx_export_options()
+    export_options = onnx_export_options(trt.__version__)
     group = int(recipe.n_view * recipe.n_inplane)
     if group not in wbps_group_sizes:
         raise ValueError("recipe pose group %d is unsupported" % group)

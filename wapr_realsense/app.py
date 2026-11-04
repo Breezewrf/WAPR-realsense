@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import sys
 import time
 
 import cv2
@@ -220,6 +221,12 @@ def main(argv=None):
                 if not cv2.imwrite(str(args.output / "rgb.png"), cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)):
                     raise OSError("Could not save camera-check image")
         return
+    if (sys.platform.startswith("linux") and not args.no_display and not args.replay
+            and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
+        raise RuntimeError(
+            "No display connection. Configure Docker/SSH display forwarding or use "
+            "--no-display --bbox X Y W H for ROI tracking / 无显示连接，请配置显示转发，"
+            "或用 --no-display --bbox X Y W H 无窗口运行")
     import torch
     from wapr import WAPREstimator
     if not torch.cuda.is_available():

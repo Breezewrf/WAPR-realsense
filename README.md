@@ -64,8 +64,12 @@ still target Python 3.10+. Docker needs the NVIDIA runtime, camera USB access an
 EGL/GL libraries; interactive ROI selection also needs display forwarding. Rebuild the native
 renderer and engines on Orin instead of copying desktop `.so` or `.engine` files. ARM64
 engine builds default to a 1 GiB workspace limit; override it with `WAPR_TRT_WORKSPACE_GB=2`.
-This limit excludes model, activation and total process memory. Jetson rendering, engine builds
-and live tracking still need on-device validation. This Python 3.8 path covers ROI tracking;
+This limit excludes model, activation and total process memory. The operator has verified D435I
+capture, native renderer compilation and EGL/OpenGL initialization. Complete pose inference and
+TensorRT engine builds still need on-device validation. TRT 8.5 exports use opset 16 to decompose
+LayerNorm into basic operations. Without display forwarding, use `--no-display --bbox X Y W H`
+with coordinates from the current rectified image; save one with
+`--check-camera --output outputs/camera_check`. This Python 3.8 path covers ROI tracking;
 optional SAM2 and other detector dependencies are outside this installation list.
 
 Drag a tight box in the frozen image and press Enter/Space. In the live window:
@@ -221,7 +225,8 @@ Detection and SAM sources support auto mode; ROI mode does not load them.
 - CPU tests cover depth conversion/rectification, configuration, loss state and robotics-output contracts.
 - Auto-mode tests cover CLI/replay wiring, retry timing, candidate selection and reacquisition with
   mocked inference. Real three-model detection, startup memory and live auto-mode accuracy remain unverified.
-- Validation currently covers only the desktop setup above.
+- JetPack 5.1.1 checks cover basic GPU operations, D435I capture and renderer compilation/initialization;
+  the complete pose pipeline remains unverified there.
 - The backend's general engine profiles and model loading are unchanged; this is not yet the proposed
   single-target low-memory engine optimization.
 

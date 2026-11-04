@@ -93,6 +93,7 @@ def main():
 
     只在 WBPS 文件旁写入 wbps_tracking.onnx 和 wbps_tracking.engine。
     """
+    import tensorrt as trt
     engine_dir = os.path.dirname(os.fspath(recipe.engine_file("wbps")))
     onnx_path = os.path.join(engine_dir, "wbps_tracking.onnx")
     engine_path = os.path.join(engine_dir, "wbps_tracking.engine")
@@ -108,7 +109,7 @@ def main():
     B = torch.zeros_like(A)
     torch.onnx.export(
         wrapper, (A, B), onnx_path, input_names=["A", "B"],
-        output_names=["within_group", "between_group"], **onnx_export_options(),
+        output_names=["within_group", "between_group"], **onnx_export_options(trt.__version__),
         dynamic_axes={"A": {0: "pose_rows"}, "B": {0: "pose_rows"},
                       "within_group": {0: "objects"}, "between_group": {0: "objects"}},
     )

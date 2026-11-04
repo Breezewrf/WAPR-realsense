@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 from wapr import recipe
 from wapr.export_engines import onnx_export_options
-from wapr.trt_compat import network_flags, workspace_bytes
+from wapr.trt_compat import network_flags, workspace_bytes, parser_error_message
 from wapr.model_metadata import checkpoint_metadata, write_onnx_metadata, read_onnx_metadata, pack_engine
 from wapr.nets import load_net
 from wapr.pose_groups import wbps_group_sizes
@@ -99,7 +99,7 @@ def main():
     layout = torch.empty((objects, group, 1), device="cuda:0")
     torch.onnx.export(
         wrapper, (A, B, layout), onnx_path, input_names=["A", "B", "layout"],
-        output_names=["within_group", "between_group"], **onnx_export_options(),
+        output_names=["within_group", "between_group"], **onnx_export_options(trt.__version__),
         dynamic_axes={"A": {0: "rows"}, "B": {0: "rows"},
                       "layout": {0: "objects", 1: "hypotheses"},
                       "within_group": {0: "objects", 1: "hypotheses"},
@@ -111,7 +111,7 @@ def main():
     network = builder.create_network(network_flags(trt))
     parser = trt.OnnxParser(network, logger)
     if not parser.parse(Path(onnx_path).read_bytes()):
-        raise RuntimeError("\n".join(str(parser.get_error(i)) for i in range(parser.num_errors)))
+        raise RuntimeError(parser_error_message(parser, onnx_path))
     profile = builder.create_optimization_profile()
     profile.set_shape("A", (2, *tail), tuple(A.shape), (max_rows, *tail))
     profile.set_shape("B", (2, *tail), tuple(B.shape), (max_rows, *tail))

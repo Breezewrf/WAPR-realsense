@@ -62,7 +62,10 @@ python -m wapr_realsense --config configs/box.yaml --init roi --backend trt
 Docker 需要 NVIDIA runtime、相机 USB 设备访问和 NVIDIA EGL/GL 库；使用 ROI 窗口还需要显示转发。
 渲染器和引擎在 Orin 本机重新构建，不复制桌面的 `.so` 或 `.engine`。
 ARM64 导出 workspace 上限默认 1 GiB，可用 `WAPR_TRT_WORKSPACE_GB=2` 调整；
-该上限不包含模型、激活和整个进程的内存。Jetson 渲染、引擎构建及实拍跟踪仍待实机验证。
+该上限不包含模型、激活和整个进程的内存。操作者已验证 D435I 取帧、原生渲染器编译及
+EGL/OpenGL 初始化；完整位姿推理和 TensorRT 引擎构建仍待实机验证。TRT 8.5 导出使用
+opset 16，将 LayerNorm 展开为基础算子。没有显示转发时使用 `--no-display --bbox X Y W H`，
+框坐标应来自当前校正后的图像；可先用 `--check-camera --output outputs/camera_check` 保存图像。
 此 Python 3.8 路径用于 ROI 跟踪；可选 SAM2 等模块的依赖不包含在该安装清单中。
 
 在冻结画面上紧贴目标拖出矩形框，Enter/空格确认。实时窗口中：
@@ -206,7 +209,7 @@ assets/meshes/   本地模型，默认不进入 Git
 - CPU 测试覆盖深度、畸变映射、配置、丢失状态与机器人输出约定。
 - 自动模式已用模拟推理测试验证 CLI/回放接入、重试间隔、候选选择和丢失后重初始化；
   真实三模型检测、启动显存与实拍自动初始化效果尚未验证。
-- 当前验证范围仅覆盖上述桌面环境。
+- JetPack 5.1.1 上已验证基础 GPU 运算、D435I 取帧、渲染器编译和初始化；完整位姿链路尚未验证。
 - 本次保留原来的网络、候选数量、引擎 profile 和模型加载方式；尚未实施单目标显存优化。
 
 运行测试：`python -B -m unittest discover -s tests -v`。
