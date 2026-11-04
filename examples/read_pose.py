@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 import time
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from wapr_realsense.output import read_latest_pose, transform_to_base
@@ -18,7 +20,7 @@ def main():
     parser.add_argument("--camera-to-base", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    calibration = None if args.camera_to_base is None else json.loads(args.camera_to_base.read_text())
+    calibration = None if args.camera_to_base is None else yaml.safe_load(args.camera_to_base.read_text())
     last_key = object()
     while True:
         record = read_latest_pose(args.input, args.max_age_ms)

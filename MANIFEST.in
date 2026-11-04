@@ -4,7 +4,7 @@ recursive-include wapr/ogl_native *.cpp *.h *.cu *.cuh *.vert *.frag CMakeLists.
 recursive-include wapr/fonts *
 recursive-include wapr/weight_license *
 recursive-include wapr/runtime_assets *
-recursive-include configs *.json
+recursive-include configs *.yaml *.yml
 prune .venv
 prune .wapr_runtime
 prune outputs

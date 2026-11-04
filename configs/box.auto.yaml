@@ -1,0 +1,23 @@
+mesh: ../assets/meshes/box/textured_mesh_modified.obj
+mesh_unit: m
+mesh_scale: 1.0
+backend: trt
+
+groundingdino_sam2_dinov2_detect:
+  activate: true
+  use_sam2: true  # false: skip SAM2 and use bbox input
+  interval: 1.0
+  score: 0.1
+  backend: trt
+  dino: vitl14
+  grounding: swinb
+  template_cache: ../.wapr_runtime/templates/box_vitl14.pt
+
+width: 640
+height: 480
+fps: 15
+min_score: 0.5
+camera_frame: color_optical_frame
+object_frame: box
+print_every: 10
+output: ../outputs/box_auto

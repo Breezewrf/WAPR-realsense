@@ -25,6 +25,7 @@ dependencies = [
     "huggingface-hub>=0.34,<1",
     "opencv-python",
     "pyrealsense2",
+    "PyYAML>=6",
     "onnx",
     "pybind11",
     "pip>=25",

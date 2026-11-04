@@ -1,0 +1,17 @@
+mesh: ../assets/meshes/box/textured_mesh_modified.obj
+mesh_unit: m
+mesh_scale: 1.0
+backend: trt
+
+groundingdino_sam2_dinov2_detect:
+  activate: false  # false: manual ROI; true: automatic initialization/recovery
+  use_sam2: true   # false: use bbox input
+
+width: 640
+height: 480
+fps: 15
+min_score: 0.5
+camera_frame: color_optical_frame
+object_frame: box
+print_every: 10
+output: ../outputs/box

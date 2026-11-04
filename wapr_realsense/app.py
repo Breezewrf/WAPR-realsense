@@ -9,6 +9,7 @@ import time
 
 import cv2
 import numpy as np
+import yaml
 
 from wapr.timing import ComponentTimer, TrackingTiming, print_timing
 
@@ -18,9 +19,38 @@ from .output import PoseWriter, pose_record, save_snapshot
 from .tracker import PoseSession
 from .initialization import build_initializer
 
+
+def _flatten_detection_config(config):
+    """Translate the detection section to the existing runtime/CLI options."""
+    config = dict(config)
+    section_name = "groundingdino_sam2_dinov2_detect"
+    fields = {"activate": "init", "use_sam2": "detect_use_sam",
+              "interval": "detect_interval", "score": "detect_score",
+              "backend": "detect_backend", "dino": "detect_dino",
+              "grounding": "detect_grounding", "template_cache": "template_cache"}
+    for name in fields.values():
+        if name in config:
+            raise ValueError("Configure %s inside %s" % (name, section_name))
+    if section_name not in config:
+        return config
+    section = config.pop(section_name)
+    if not isinstance(section, dict):
+        raise ValueError("%s must be a mapping" % section_name)
+    for name, value in section.items():
+        if name not in fields:
+            raise ValueError("Unknown configuration field: %s.%s" % (section_name, name))
+        target = fields[name]
+        if name == "activate":
+            if not isinstance(value, bool):
+                raise ValueError("%s.activate must be a boolean" % section_name)
+            value = "auto" if value else "roi"
+        config[target] = value
+    return config
+
+
 def parse_args(argv=None):
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--config", type=Path, help="JSON configuration; CLI flags override its values")
+    pre.add_argument("--config", type=Path, help="YAML configuration (.yaml/.yml); CLI flags override its values")
     preliminary, _ = pre.parse_known_args(argv)
     parser = argparse.ArgumentParser(description=__doc__, parents=[pre])
     parser.add_argument("--mesh", type=Path, default=Path("assets/meshes/box/textured_mesh_modified.obj"))
@@ -55,11 +85,15 @@ def parse_args(argv=None):
     parser.add_argument("--replay", type=Path, help="Offline RGB-D folder for interface validation")
     if preliminary.config is not None:
         try:
-            config = json.loads(preliminary.config.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
+            if preliminary.config.suffix.lower() not in (".yaml", ".yml"):
+                raise ValueError("Configuration file must use .yaml or .yml")
+            content = preliminary.config.read_text(encoding="utf-8")
+            config = yaml.safe_load(content)
+            if not isinstance(config, dict):
+                raise ValueError("Configuration must be a mapping")
+            config = _flatten_detection_config(config)
+        except (OSError, ValueError, yaml.YAMLError) as error:
             parser.error("Cannot read configuration: %s" % error)
-        if not isinstance(config, dict):
-            parser.error("Configuration must be a JSON object")
         actions = {action.dest: action for action in parser._actions if action.dest not in ("help", "config")}
         for name, value in config.items():
             if name not in actions:

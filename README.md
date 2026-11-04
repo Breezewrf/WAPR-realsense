@@ -25,7 +25,7 @@ uv sync
 source .venv/bin/activate
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python -m wapr_realsense --check-camera
-python -m wapr_realsense --config configs/box.json
+python -m wapr_realsense --config configs/box.yaml
 ```
 
 On first use, prepare the system CUDA toolkit, C++ compiler and EGL/GL development headers, then run:
@@ -38,7 +38,7 @@ python -m wapr.export_engines
 `uv sync` installs Python dependencies; these steps prepare weights, the renderer and local TensorRT engines.
 With a working cache, run the application directly.
 
-`configs/box.json` references the operator's local mesh at
+`configs/box.yaml` references the operator's local mesh at
 `assets/meshes/box/textured_mesh_modified.obj`. Supply your mesh at that path or edit
 the configuration; source exports do not bundle it. Paths inside a config are relative to that file.
 Explicit CLI arguments override config values.
@@ -56,15 +56,15 @@ python -m wapr_realsense --mesh /absolute/path/model.obj --mesh-unit m --backend
 Headless ROI operation requires an initial box in rectified color-image pixels:
 
 ```bash
-python -m wapr_realsense --config configs/box.json --no-display --bbox 180 100 280 300
+python -m wapr_realsense --config configs/box.yaml --no-display --bbox 180 100 280 300
 ```
 
 ## Optional automatic initialization
 
 ```bash
-python -m wapr_realsense --config configs/box.auto.json
+python -m wapr_realsense --config configs/box.auto.yaml
 # Or enable it for any existing target configuration, including headless operation:
-python -m wapr_realsense --config configs/box.json --init auto --no-display
+python -m wapr_realsense --config configs/box.yaml --init auto --no-display
 ```
 
 Auto mode uses the existing WAPR detector: GroundingDINO proposes boxes, SAM2 segments them,
@@ -73,23 +73,37 @@ poses from the detected masks; the highest `score_6d` candidate passing `--min-s
 No reference photo is used. Multiple identical instances cannot be distinguished by physical identity.
 Only search frames run detection; accepted poses use the existing six-candidate tracker.
 
-Configuration fields (also available as hyphenated CLI flags):
+YAML configurations group detection options under `groundingdino_sam2_dinov2_detect`:
 
-| Field | Default | Purpose |
+```yaml
+groundingdino_sam2_dinov2_detect:
+  activate: true       # false selects manual ROI initialization
+  use_sam2: false      # true enables SAM2; false uses bbox input
+  interval: 1.0
+  score: 0.1
+  backend: trt
+  dino: vitl14
+  grounding: swinb
+  template_cache: ../.wapr_runtime/templates/box_vitl14.pt
+```
+
+| Field within the section | Default | Purpose |
 | --- | --- | --- |
-| `init` | `roi` | `auto` enables CAD-template detection |
-| `detect_interval` | `1.0` | Seconds after a failed search completes before the next attempt |
-| `detect_score` | `0.1` | 2D template-match acceptance gate, separate from `min_score` |
-| `detect_backend` | `trt` | DINOv2 encoder backend; `torch` also supported |
-| `detect_dino` | `vitl14` | `vits14`, `vitb14` or `vitl14` |
-| `detect_grounding` | `swinb` | `swint` or `swinb` |
-| `detect_use_sam` | `true` | Use SAM2 segmentation; `false` uses bbox regions for matching and bbox input for WAPR |
+| `activate` | `false` | Enable automatic initialization and detection after tracking loss |
+| `use_sam2` | `true` | Use SAM2 masks; `false` uses bbox regions for matching and bbox input for WAPR |
+| `interval` | `1.0` | Seconds after a failed search completes before the next attempt |
+| `score` | `0.1` | 2D template-match acceptance gate, separate from top-level `min_score` |
+| `backend` | `trt` | DINOv2 encoder backend; `torch` also supported |
+| `dino` | `vitl14` | `vits14`, `vitb14` or `vitl14` |
+| `grounding` | `swinb` | `swint` or `swinb` |
 | `template_cache` | unset | Optional `.pt` cache; unset builds templates in GPU memory each run |
 
-To disable SAM2, add `"detect_use_sam": false` to the JSON config, or use:
+Configuration files use `.yaml` or `.yml`; detection options belong in the section above.
+Explicit CLI flags override config values: `--init auto` / `--init roi` overrides `activate`,
+and `--detect-use-sam` / `--no-detect-use-sam` overrides `use_sam2`. For example:
 
 ```bash
-python -m wapr_realsense --config configs/box.json --init auto --no-detect-use-sam
+python -m wapr_realsense --config configs/box.auto.yaml --no-detect-use-sam
 ```
 
 This skips SAM2 model loading, inference and checkpoint downloads. GroundingDINO and DINOv2
@@ -102,7 +116,7 @@ Auto mode prepares optional detector dependencies and downloads missing weights 
 the pose-only setup script does not preload them. The DINO TensorRT backend builds its engine
 when needed; GroundingDINO and SAM2 remain FP32. Expect additional startup time and GPU memory.
 An incompatible environment is reported by the existing optional-dependency bootstrap.
-The sample cache is relative to its JSON file, under `.wapr_runtime/templates/` rather than
+The sample cache is relative to its configuration file, under `.wapr_runtime/templates/` rather than
 `.wapr_runtime/cache/`. Mesh/texture, encoder or source changes can invalidate the cache.
 The application automatically selects a versioned sibling path, rebuilds once and reuses it on later
 runs; old files are preserved. `DET2D_CAD_CACHE_CHANGED` prints the selected path. No directory

@@ -1,0 +1,14 @@
+mesh: ../assets/meshes/your_target/model.obj
+mesh_unit: m
+mesh_scale: 1.0
+backend: trt
+groundingdino_sam2_dinov2_detect:
+  activate: false
+  use_sam2: true
+width: 640
+height: 480
+fps: 15
+min_score: 0.5
+camera_frame: color_optical_frame
+object_frame: target_object
+output: ../outputs/target

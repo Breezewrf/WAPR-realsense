@@ -26,7 +26,7 @@ uv sync
 source .venv/bin/activate
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python -m wapr_realsense --check-camera
-python -m wapr_realsense --config configs/box.json
+python -m wapr_realsense --config configs/box.yaml
 ```
 
 首次使用还需准备系统 CUDA toolkit、C++ 编译器及 EGL/GL 开发头文件，再执行：
@@ -55,15 +55,15 @@ python -m wapr_realsense --mesh /absolute/path/model.obj --mesh-unit m --backend
 ROI 模式无窗口运行需提供初始框，像素坐标对应校正后的彩色图像：
 
 ```bash
-python -m wapr_realsense --config configs/box.json --no-display --bbox 180 100 280 300
+python -m wapr_realsense --config configs/box.yaml --no-display --bbox 180 100 280 300
 ```
 
 ## 可选自动初始化
 
 ```bash
-python -m wapr_realsense --config configs/box.auto.json
+python -m wapr_realsense --config configs/box.auto.yaml
 # 也可以直接为已有目标配置开启自动模式，支持无窗口运行：
-python -m wapr_realsense --config configs/box.json --init auto --no-display
+python -m wapr_realsense --config configs/box.yaml --init auto --no-display
 ```
 
 自动模式复用现有 WAPR 检测器：GroundingDINO 生成候选框，SAM2 分割，DINOv2 与当前
@@ -71,23 +71,37 @@ mesh 的多视角渲染模板匹配，再由 WAPR 根据检测 mask 估计位姿
 的候选中 `score_6d` 最高者。这里使用 CAD 模板，不使用参考照片，也无法区分多个相同物体的
 物理身份。只在搜索阶段运行检测，成功后切回原有六候选跟踪。
 
-以下 JSON 配置均有对应的连字符命令行参数：
+YAML 将检测选项集中到 `groundingdino_sam2_dinov2_detect` 下：
 
-| 配置字段 | 默认值 | 含义 |
+```yaml
+groundingdino_sam2_dinov2_detect:
+  activate: true       # false 使用手动 ROI 初始化
+  use_sam2: false      # true 开启 SAM2；false 使用 bbox 输入
+  interval: 1.0
+  score: 0.1
+  backend: trt
+  dino: vitl14
+  grounding: swinb
+  template_cache: ../.wapr_runtime/templates/box_vitl14.pt
+```
+
+| 块内字段 | 默认值 | 含义 |
 | --- | --- | --- |
-| `init` | `roi` | 设置为 `auto` 开启 CAD 模板检测 |
-| `detect_interval` | `1.0` | 一次搜索失败结束后，到下一次尝试的间隔秒数 |
-| `detect_score` | `0.1` | 2D 模板匹配阈值，与 `min_score` 分开 |
-| `detect_backend` | `trt` | DINOv2 编码后端，也支持 `torch` |
-| `detect_dino` | `vitl14` | 支持 `vits14`、`vitb14`、`vitl14` |
-| `detect_grounding` | `swinb` | 支持 `swint`、`swinb` |
-| `detect_use_sam` | `true` | 是否使用 SAM2；`false` 时使用 bbox 区域匹配，并以 bbox 输入 WAPR |
-| `template_cache` | 不设置 | 可选 `.pt` 模板缓存；不设置则每次启动在显存中生成 |
+| `activate` | `false` | 开启自动初始化及跟踪丢失后的重新检测 |
+| `use_sam2` | `true` | 是否使用 SAM2；`false` 时使用 bbox 区域匹配，并以 bbox 输入 WAPR |
+| `interval` | `1.0` | 一次搜索失败结束后，到下一次尝试的间隔秒数 |
+| `score` | `0.1` | 2D 模板匹配阈值，与顶层 `min_score` 分开 |
+| `backend` | `trt` | DINOv2 编码后端，也支持 `torch` |
+| `dino` | `vitl14` | 支持 `vits14`、`vitb14`、`vitl14` |
+| `grounding` | `swinb` | 支持 `swint`、`swinb` |
+| `template_cache` | 不设置 | 可选 `.pt` 模板缓存；不设置则每次启动在显存中构建 |
 
-在 JSON 配置中添加 `"detect_use_sam": false` 即可关闭 SAM2，也可以使用命令行：
+配置文件使用 `.yaml` 或 `.yml`，检测选项统一放在上述配置块内。命令行显式参数优先：
+`--init auto` / `--init roi` 覆盖 `activate`，
+`--detect-use-sam` / `--no-detect-use-sam` 覆盖 `use_sam2`。例如：
 
 ```bash
-python -m wapr_realsense --config configs/box.json --init auto --no-detect-use-sam
+python -m wapr_realsense --config configs/box.auto.yaml --no-detect-use-sam
 ```
 
 关闭后跳过 SAM2 模型加载、推理和权重下载，仍运行 GroundingDINO 和 DINOv2。
@@ -97,7 +111,7 @@ SAM2 计时显示 `skipped`。`--detect-use-sam` 可以覆盖配置并重新启�
 
 首次使用会按现有机制准备可选检测依赖、下载缺失权重；仅位姿环境准备脚本不会预加载它们。
 DINO TensorRT 后端按需构建引擎，GroundingDINO 和 SAM2 保持 FP32，启动耗时和显存占用会增加。
-环境不兼容时由现有依赖准备机制报错。示例模板缓存相对 JSON 文件解析，位于
+环境不兼容时由现有依赖准备机制报错。示例模板缓存相对配置文件解析，位于
 `.wapr_runtime/templates/`，不在 `.wapr_runtime/cache/` 内。mesh/纹理、编码器或源码变化
 使缓存失效时，应用自动选择同目录下带版本标识的新路径，首次重建、后续复用，并保留旧文件。
 `DET2D_CAD_CACHE_CHANGED` 会打印实际路径，不需要删除目录。设置 `template_cache: null`

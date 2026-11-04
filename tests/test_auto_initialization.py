@@ -3,6 +3,7 @@
 from contextlib import redirect_stdout
 import io
 import json
+import yaml
 from pathlib import Path
 import subprocess
 import sys
@@ -202,8 +203,9 @@ class AutoInitializationTests(unittest.TestCase):
             cv2.imwrite(str(folder / "rgb.png"), f.rgb)
             np.save(folder / "depth.npy", f.depth_m)
             (folder / "camera.json").write_text(json.dumps({"fx": 20, "fy": 20, "cx": 8, "cy": 6}))
-            cfg = folder / "auto.json"
-            cfg.write_text(json.dumps({"init": "auto", "no_display": True, "replay": ".",
+            cfg = folder / "auto.yaml"
+            cfg.write_text(yaml.safe_dump({"groundingdino_sam2_dinov2_detect": {"activate": True},
+                                       "no_display": True, "replay": ".",
                                        "max_frames": 2, "output": "out"}))
             estimator = Mock()
             mesh = Mock(extents=np.array([0.2, 0.3, 0.4]))
