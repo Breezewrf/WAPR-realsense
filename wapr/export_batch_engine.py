@@ -21,6 +21,7 @@ import torch.nn.functional as F
 
 from wapr import recipe
 from wapr.export_engines import onnx_export_options
+from wapr.trt_compat import network_flags, workspace_bytes
 from wapr.model_metadata import checkpoint_metadata, write_onnx_metadata, read_onnx_metadata, pack_engine
 from wapr.nets import load_net
 from wapr.pose_groups import wbps_group_sizes
@@ -107,7 +108,7 @@ def main():
     write_onnx_metadata(onnx_path, checkpoint_metadata(recipe.weight_file("wbps"), "wbps"))
     logger = trt.Logger(getattr(trt.Logger, "WARNING"))
     builder = trt.Builder(logger)
-    network = builder.create_network(0)
+    network = builder.create_network(network_flags(trt))
     parser = trt.OnnxParser(network, logger)
     if not parser.parse(Path(onnx_path).read_bytes()):
         raise RuntimeError("\n".join(str(parser.get_error(i)) for i in range(parser.num_errors)))
@@ -120,7 +121,7 @@ def main():
     config = builder.create_builder_config()
     config.add_optimization_profile(profile)
     config.set_flag(trt.BuilderFlag.FP16)
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 * 1024 ** 3)
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes())
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         raise RuntimeError("WBPS batch engine build failed")

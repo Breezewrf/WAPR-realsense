@@ -42,6 +42,29 @@ box 配置引用本地 `assets/meshes/box/textured_mesh_modified.obj`，单位�
 干净源码不包含这个模型；新机器上自行复制模型，或修改配置中的路径。
 **配置内路径相对配置文件解析，命令行显式参数优先。**
 
+JetPack 5.1.1 / Python 3.8 的源码运行路径使用 `uv pip`，不执行上面的桌面 `uv sync`。
+先安装对应 Jetson 的 GPU 包；当前操作者已验证 torch `2.1.0a0+41361538.nv23.06`、
+torchvision `0.16.2+c6f3977` 的 CUDA 运算和 NMS，以及 TensorRT `8.5.2.2` Builder。
+在同一个已激活的 `.venv` 中继续：
+
+```bash
+uv pip install -r requirements-jetson.txt
+uv pip check
+export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
+python -m wapr_realsense --check-camera
+python scripts/setup_runtime.py
+python -m wapr.export_engines
+python -m wapr_realsense --config configs/box.yaml --init roi --backend trt
+```
+
+此文件固定已验证的 GPU 包版本，并限制 NumPy/Kornia 等兼容范围；TensorRT 沿用系统安装。
+桌面 `pyproject.toml` 和 `uv.lock` 仍用于 Python 3.10+ 的桌面环境。
+Docker 需要 NVIDIA runtime、相机 USB 设备访问和 NVIDIA EGL/GL 库；使用 ROI 窗口还需要显示转发。
+渲染器和引擎在 Orin 本机重新构建，不复制桌面的 `.so` 或 `.engine`。
+ARM64 导出 workspace 上限默认 1 GiB，可用 `WAPR_TRT_WORKSPACE_GB=2` 调整；
+该上限不包含模型、激活和整个进程的内存。Jetson 渲染、引擎构建及实拍跟踪仍待实机验证。
+此 Python 3.8 路径用于 ROI 跟踪；可选 SAM2 等模块的依赖不包含在该安装清单中。
+
 在冻结画面上紧贴目标拖出矩形框，Enter/空格确认。实时窗口中：
 `r` 重新初始化、`s` 保存 RGB-D 与结果、`q`/Esc 退出。
 默认采用本机已验证可取帧的 640×480、15 Hz；采集频率不代表位姿输出频率。

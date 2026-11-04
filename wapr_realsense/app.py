@@ -64,8 +64,11 @@ def parse_args(argv=None):
     parser.add_argument("--detect-backend", choices=["trt", "torch"], default="trt", help="DINOv2 encoder backend")
     parser.add_argument("--detect-dino", choices=["vits14", "vitb14", "vitl14"], default="vitl14")
     parser.add_argument("--detect-grounding", choices=["swint", "swinb"], default="swinb")
-    parser.add_argument("--detect-use-sam", action=argparse.BooleanOptionalAction, default=True,
+    sam_options = parser.add_mutually_exclusive_group()
+    sam_options.add_argument("--detect-use-sam", action="store_true", default=True,
                         help="Use SAM2 masks; --no-detect-use-sam uses bounding boxes")
+    sam_options.add_argument("--no-detect-use-sam", action="store_false", dest="detect_use_sam",
+                             help="Use bounding boxes without SAM2")
     parser.add_argument("--template-cache", type=Path, help="Optional CAD template .pt cache; otherwise kept in GPU memory")
     parser.add_argument("--serial", help="Select a camera by serial number")
     parser.add_argument("--width", type=int, default=640)

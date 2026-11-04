@@ -5,8 +5,8 @@
 # 作者与版权人：Yulin Wang；使用、修改与再分发须遵守项目 LICENSE。
 # Third-party portions retain their original notices and terms; see THIRD_PARTY_NOTICES.txt.
 
-# Export FP32 ONNX next to each weight, then a TensorRT 10 FP16 engine.
-# 在每份权重旁边导出 FP32 ONNX，再写 TensorRT 10 的 FP16 引擎。
+# Export FP32 ONNX next to each weight, then a TensorRT 8.5+/10 FP16 engine.
+# 在每份权重旁边导出 FP32 ONNX，再写 TensorRT 8.5+/10 的 FP16 引擎。
 # Run from anywhere: python -m wapr.export_engines
 # 任意目录可运行：python -m wapr.export_engines
 import sys
@@ -26,6 +26,7 @@ from wapr import recipe
 from wapr.model_metadata import checkpoint_metadata, write_onnx_metadata, read_onnx_metadata, pack_engine
 from wapr.nets import load_net
 from wapr.pose_groups import wbps_group_sizes
+from wapr.trt_compat import network_flags, workspace_bytes
 
 
 def _onnx_unflatten(graph, tensor, axis, sizes):
@@ -372,7 +373,7 @@ def _shape(batch, channels, px):
 
 def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
     """
-    # Build one TensorRT 10 FP16 engine.
+    # Build one TensorRT 8.5+/10 FP16 engine.
 
         Inputs stay FP32.
 
@@ -381,11 +382,11 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
     ## Args
 
         - onnx_path: the FP32 ONNX file.
-        - engine_path: cache/weights/<name>.engine by default. min_shape, opt_shape, and max_shape are (batch, channels, px, px) for inputs A and B. A TensorRT version other than 10.x raises RuntimeError. A failed build raises RuntimeError.
+        - engine_path: cache/weights/<name>.engine by default. min_shape, opt_shape, and max_shape are (batch, channels, px, px) for inputs A and B. TensorRT 8.5+ in the 8.x series or 10.x is required. A failed build raises RuntimeError.
 
     ---
 
-    # 建一份 TensorRT 10 的 FP16 引擎。
+    # 建一份 TensorRT 8.5+/10 的 FP16 引擎。
 
         输入仍是 FP32。
 
@@ -395,16 +396,14 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
 
         - onnx_path: FP32 的 ONNX。
         - engine_path: 默认 cache/weights/<name>.engine。
-        - min_shape、opt_shape、max_shape: 输入 A 和 B 的 (batch, channels, px, px)。不是 TensorRT 10.x 就抛出 RuntimeError。构建失败也抛出 RuntimeError。
+        - min_shape、opt_shape、max_shape: 输入 A 和 B 的 (batch, channels, px, px)。要求 TensorRT 8.x 中的 8.5+ 或 10.x。构建失败也抛出 RuntimeError。
 
 """
     import tensorrt as trt
 
-    if not str(trt.__version__).startswith("10."):
-        raise RuntimeError("TensorRT 10.x is required")
     logger = trt.Logger(getattr(trt.Logger, "WARNING"))
     builder = trt.Builder(logger)
-    network = builder.create_network(0)
+    network = builder.create_network(network_flags(trt))
     parser = trt.OnnxParser(network, logger)
     if not parser.parse(Path(onnx_path).read_bytes()):
         raise RuntimeError("\n".join(str(parser.get_error(i)) for i in range(parser.num_errors)))
@@ -414,7 +413,7 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
     config = builder.create_builder_config()
     config.add_optimization_profile(profile)
     config.set_flag(trt.BuilderFlag.FP16)
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 * 1024 ** 3)
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes())
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         raise RuntimeError("FP16 engine build failed")
@@ -423,7 +422,7 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
 
 def main():
     """
-    # Write FP32 ONNX using an opset supported by torch (up to 17), then a TensorRT 10 FP16 engine.
+    # Write FP32 ONNX using an opset supported by torch (up to 17), then a TensorRT 8.5+/10 FP16 engine.
 
         The four names are wapr_w_mask, wapr_wo_mask, sapr, and wbps.
 

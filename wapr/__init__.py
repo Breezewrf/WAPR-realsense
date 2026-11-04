@@ -11,8 +11,8 @@ import sys
 
 # Also reject unsupported source checkouts before dependency preparation.
 # 源码调用同样在准备依赖前拒绝不支持的 Python 版本。
-if sys.version_info < (3, 10):
-    raise RuntimeError("WAPR requires Python 3.10 or newer / WAPR 需要 Python 3.10 或更高版本")
+if sys.version_info < (3, 8):
+    raise RuntimeError("WAPR requires Python 3.8 or newer / WAPR 需要 Python 3.8 或更高版本")
 
 __all__ = ["WAPREstimator"]
 

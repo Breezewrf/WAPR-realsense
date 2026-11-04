@@ -43,6 +43,31 @@ With a working cache, run the application directly.
 the configuration; source exports do not bundle it. Paths inside a config are relative to that file.
 Explicit CLI arguments override config values.
 
+For the JetPack 5.1.1 / Python 3.8 source runtime, use `uv pip` instead of the desktop
+`uv sync` above. Install the matching Jetson GPU packages first. The operator has verified
+CUDA operations and NMS with torch `2.1.0a0+41361538.nv23.06`, torchvision `0.16.2+c6f3977`,
+and Builder creation with TensorRT `8.5.2.2`. In that same activated `.venv`, continue with:
+
+```bash
+uv pip install -r requirements-jetson.txt
+uv pip check
+export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
+python -m wapr_realsense --check-camera
+python scripts/setup_runtime.py
+python -m wapr.export_engines
+python -m wapr_realsense --config configs/box.yaml --init roi --backend trt
+```
+
+The requirements retain those GPU versions and constrain compatible NumPy/Kornia versions;
+TensorRT uses the existing system installation. The desktop `pyproject.toml` and `uv.lock`
+still target Python 3.10+. Docker needs the NVIDIA runtime, camera USB access and NVIDIA
+EGL/GL libraries; interactive ROI selection also needs display forwarding. Rebuild the native
+renderer and engines on Orin instead of copying desktop `.so` or `.engine` files. ARM64
+engine builds default to a 1 GiB workspace limit; override it with `WAPR_TRT_WORKSPACE_GB=2`.
+This limit excludes model, activation and total process memory. Jetson rendering, engine builds
+and live tracking still need on-device validation. This Python 3.8 path covers ROI tracking;
+optional SAM2 and other detector dependencies are outside this installation list.
+
 Drag a tight box in the frozen image and press Enter/Space. In the live window:
 `r` reinitializes, `s` saves RGB-D and pose, and `q`/Esc exits.
 The default camera profile is 640×480 at 15 Hz; capture rate is not inference throughput.

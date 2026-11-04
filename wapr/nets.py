@@ -1761,8 +1761,15 @@ class _Engine:
         if self.engine is None:
             raise RuntimeError("engine")
         self.context = self.engine.create_execution_context()
+        if self.context is None:
+            raise RuntimeError("Could not create TensorRT execution context")
         self.out_names = list(out_names)
-        min_shape, opt_shape, max_shape = self.engine.get_tensor_profile_shape("A", 0)
+        self._use_v3 = int(trt.__version__.split(".")[0]) >= 10
+        if self._use_v3:
+            min_shape, opt_shape, max_shape = self.engine.get_tensor_profile_shape("A", 0)
+        else:
+            min_shape, opt_shape, max_shape = self.engine.get_profile_shape(
+                0, self.engine.get_binding_index("A"))
         self.min_batch = int(min_shape[0])
         self.opt_batch = int(opt_shape[0])
         self.max_batch = int(max_shape[0])
@@ -1798,17 +1805,37 @@ class _Engine:
 
 """
         first = next(iter(feeds.values()))
+        bindings = None if self._use_v3 else [0] * self.engine.num_bindings
         for name, tensor in feeds.items():
-            self.context.set_input_shape(name, tuple(tensor.shape))
-            self.context.set_tensor_address(name, int(tensor.data_ptr()))
+            if self._use_v3:
+                accepted = self.context.set_input_shape(name, tuple(tensor.shape))
+                self.context.set_tensor_address(name, int(tensor.data_ptr()))
+            else:
+                index = self.engine.get_binding_index(name)
+                accepted = self.context.set_binding_shape(index, tuple(tensor.shape))
+                bindings[index] = int(tensor.data_ptr())
+            if accepted is False:
+                raise ValueError("TensorRT input shape outside profile: " + name)
         outputs = {}
         for name in self.out_names:
-            shape = tuple(int(x) for x in self.context.get_tensor_shape(name))
+            index = None if self._use_v3 else self.engine.get_binding_index(name)
+            dims = self.context.get_tensor_shape(name) if self._use_v3 else self.context.get_binding_shape(index)
+            shape = tuple(int(x) for x in dims)
+            if any(size < 0 for size in shape):
+                raise RuntimeError("Unresolved TensorRT output shape: " + name)
             buf = torch.empty(shape, device=first.device, dtype=torch.float32)
-            self.context.set_tensor_address(name, int(buf.data_ptr()))
+            if self._use_v3:
+                self.context.set_tensor_address(name, int(buf.data_ptr()))
+            else:
+                bindings[index] = int(buf.data_ptr())
             outputs[name] = buf
         stream = torch.cuda.current_stream(first.device)
-        self.context.execute_async_v3(stream.cuda_stream)
+        if self._use_v3:
+            executed = self.context.execute_async_v3(stream.cuda_stream)
+        else:
+            executed = self.context.execute_async_v2(bindings=bindings, stream_handle=stream.cuda_stream)
+        if executed is False:
+            raise RuntimeError("TensorRT execution failed")
         return outputs
 
 
