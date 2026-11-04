@@ -24,6 +24,7 @@ See [installation](docs/install.md) for a fresh environment.
 For the existing prepared environment, from this directory:
 
 ```bash
+uv sync
 source .venv/bin/activate
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python -m wapr_realsense --check-camera

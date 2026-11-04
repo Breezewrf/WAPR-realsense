@@ -23,6 +23,7 @@
 在当前已准备好的环境和仓库根目录中：
 
 ```bash
+uv sync
 source .venv/bin/activate
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python -m wapr_realsense --check-camera

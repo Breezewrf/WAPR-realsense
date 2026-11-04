@@ -2,6 +2,7 @@
 
 The target discussed for this application is **Orin NX 16GB with JetPack 6.x**.
 The project has not yet been deployed or benchmarked on that board.
+The default `uv sync` dependencies select the desktop CUDA stack; use the target-specific steps below for Jetson.
 
 ## Preserve the target's GPU stack
 
@@ -20,7 +21,8 @@ installed outside pip on the target. The base project does not select these pack
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -c "import torch, tensorrt, cv2, pyrealsense2; print(torch.cuda.is_available(), tensorrt.__version__)"
-python -m pip install -e ".[export]"
+python -m pip install -r requirements.txt
+python -m pip install --no-deps -e .
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python scripts/setup_runtime.py --check
 python scripts/setup_runtime.py

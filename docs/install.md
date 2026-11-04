@@ -15,27 +15,26 @@ It now defaults to ROI initialization and 15 Hz. The application has no automati
 
 ## Fresh desktop environment / 新的桌面环境
 
-Run from the source root. Prepare CUDA-enabled PyTorch for your GPU first.
-The following pair matches the desktop configuration exercised in this workspace;
-it is not the installation command for Jetson:
+From the source root, reproduce the current CUDA 12.6 desktop environment with:
 
 ```bash
-python3.10 -m venv .venv
+uv sync
 source .venv/bin/activate
-python -m pip install "pip>=25"
-python -m pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu126
-python -m pip install -e ".[desktop,export]"
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python scripts/setup_runtime.py
 python -m wapr.export_engines
 python -m wapr_realsense --check-camera
 ```
 
-The ROI application does not use torchvision directly. It is included above to reproduce the
-existing desktop pair; GPU package selection belongs to the target host.
-The setup helper prepares pose dependencies, OpenGL/CUDA compilation and four pose checkpoints.
-It does not prepare detector models, SAM, reconstruction, robot simulation or BOP dataset excerpts.
-Existing package replacements still go through the upstream installer's dependency review.
+The project declares the same packages as the previous manual installation commands.
+Only the tested PyTorch/Torchvision and TensorRT versions are fixed; ordinary dependencies
+are resolved normally. uv uses the official CUDA 12.6 PyTorch index and NVIDIA's index
+for TensorRT binaries. pip is included because the upstream setup helper invokes it.
+The first install downloads large CUDA/TensorRT packages; subsequent installs reuse uv's cache.
+`uv sync` generates `uv.lock` automatically. No separate environment snapshot is required.
+
+This configuration is for the desktop. Jetson should use the [JetPack-specific procedure](jetson.md).
+The setup helper prepares the pose runtime and four pose checkpoints without detector models.
 
 Linux OpenGL rendering needs a C++ compiler, CMake, CUDA toolkit/nvcc and EGL/GL development headers.
 If the setup helper reports missing system packages on Ubuntu, install the reported prerequisites:
@@ -44,8 +43,8 @@ If the setup helper reports missing system packages on Ubuntu, install the repor
 sudo apt-get install build-essential cmake ninja-build libegl1-mesa-dev libgl1-mesa-dev
 ```
 
-Use one OpenCV provider. The desktop extra selects `opencv-python` for ROI windows.
-For headless targets, prepare a suitable OpenCV package yourself and install the base project.
+Use one OpenCV provider. The default dependencies select `opencv-python` for ROI windows.
+For a headless or embedded target with system-provided packages, install the project with `--no-deps` after preparing its dependencies.
 
 ## Mesh and paths / 模型与路径
 

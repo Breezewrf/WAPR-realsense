@@ -7,9 +7,14 @@ name = "wapr-realsense"
 version = "0.1.0"
 description = "RealSense RGB-D single-object 6D pose tracking for robotics, based on WAPR"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = {file = "LICENSE"}
 dependencies = [
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "tensorrt-cu12==10.16.1.11",
+    "tensorrt-cu12-bindings==10.16.1.11",
+    "tensorrt-cu12-libs==10.16.1.11",
     "numpy",
     "scipy",
     "trimesh",
@@ -18,13 +23,17 @@ dependencies = [
     "filelock",
     "packaging",
     "huggingface-hub>=0.34,<1",
+    "opencv-python",
+    "pyrealsense2",
+    "onnx",
+    "pybind11",
+    "pip>=25",
 ]
 
-# CUDA PyTorch, TensorRT and one OpenCV provider are supplied by the target host.
-# Camera SDK installation is separate on Jetson when supplied by librealsense.
+# Retained for compatibility with earlier installation commands.
 [project.optional-dependencies]
-desktop = ["opencv-python", "pyrealsense2"]
-export = ["onnx", "pybind11"]
+desktop = []
+export = []
 
 [project.scripts]
 wapr-realsense = "wapr_realsense.app:entrypoint"
@@ -41,3 +50,20 @@ wapr = [
 
 [tool.setuptools]
 license-files = ["LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "UPSTREAM.md"]
+
+# Match the CUDA 12.6 desktop stack used by this project.
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+tensorrt-cu12-bindings = { index = "nvidia" }
+tensorrt-cu12-libs = { index = "nvidia" }

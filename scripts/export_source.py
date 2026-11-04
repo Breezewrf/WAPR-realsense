@@ -8,7 +8,7 @@ import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
-    ".gitignore", "pyproject.toml", "MANIFEST.in", "README.md", "README.zh-CN.md",
+    ".gitignore", ".python-version", "pyproject.toml", "MANIFEST.in", "README.md", "README.zh-CN.md",
     "requirements.txt", "LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt",
     "THIRD_PARTY_NOTICES.txt", "UPSTREAM.md", ".github/workflows/ci.yml",
     "examples/realsense_pose.py", "examples/read_pose.py", "examples/README_realsense.md",
@@ -20,6 +20,8 @@ GENERATED_SUFFIXES = {".pyc", ".pyo", ".so", ".dll", ".pyd", ".engine", ".pth", 
 
 def source_files(root=ROOT):
     paths = {root / name for name in FILES}
+    if (root / "uv.lock").is_file():
+        paths.add(root / "uv.lock")
     for name in DIRECTORIES:
         for path in (root / name).rglob("*"):
             relative = path.relative_to(root)
