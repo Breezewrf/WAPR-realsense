@@ -233,6 +233,12 @@ crop/network values are already included in their parent stages. The same summar
 in the browser. Profiling defaults off because extra CUDA synchronization changes latency;
 compare normal tracking performance with the flag removed. Initialization and warmup are excluded.
 
+The crop path builds one perspective sampling grid for RGB, XYZ and the optional mask, and
+omits the unused observed-depth crop. It uses the renderers' documented 0–1 RGB output directly,
+avoiding a GPU scalar range check. CPU comparisons against independent Kornia warps cover
+mask/no-mask inputs and batches 1/2/3/6/12; Jetson latency and pose accuracy still need comparison.
+These preprocessing changes reuse existing engines.
+
 ## Browser demo
 
 ```bash

@@ -217,6 +217,11 @@ python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-
 分段计时默认关闭，额外 CUDA 同步会改变延迟；评估正常跟踪性能时去掉此开关。
 初始化和预热不混入跟踪分段统计。
 
+裁剪路径为 RGB、XYZ 和可选 mask 复用一份透视采样网格，省去未使用的观测深度裁剪；
+直接使用渲染器约定的 0–1 RGB 输出，避免读取 GPU 标量判断颜色范围。
+已在 CPU 上与独立 Kornia 变换对照，覆盖有/无 mask 和 batch 1/2/3/6/12；
+Jetson 延迟和位姿精度仍需实机对比。这些预处理优化复用已有 engine。
+
 ## 网页 Demo
 
 ```bash

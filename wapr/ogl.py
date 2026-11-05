@@ -3095,6 +3095,24 @@ def _crop_adjusted_K(Ks, bboxes, out_h, out_w):
     return Ks_c
 
 
+def _crop_sampling_grid(transform, source_hw, output_hw):
+    """Build Kornia's warp_perspective grid once for all observed channels.
+
+    Preserve its pixel normalization and align_corners=False sampling semantics.
+    Both supported renderer paths return normalized RGB independently of this grid.
+    """
+    from kornia.geometry.conversions import normalize_homography
+    from kornia.geometry.linalg import transform_points
+    from kornia.utils import create_meshgrid
+
+    normalized = normalize_homography(transform, source_hw, output_hw)
+    inverse = torch.linalg.inv(normalized)
+    height, width = output_hw
+    grid = create_meshgrid(height, width, normalized_coordinates=True, device=transform.device)
+    grid = grid.to(transform.dtype).expand(len(transform), height, width, 2)
+    return transform_points(inverse[:, None, None], grid)
+
+
 def make_crop_pair(rgb, depth, mask, poses, K, mesh, diameter_m, crop_ratio, use_mask, device, meshes=None, observed_xyz=None, mesh_ids=None):
     """
     # Build the rendered view A and the observed view B, and return the poses and diameters with them.
@@ -3194,7 +3212,7 @@ def make_crop_pair(rgb, depth, mask, poses, K, mesh, diameter_m, crop_ratio, use
         - dia: (N,) float32，单位米，即扩展后的直径。
 
 """
-    import kornia
+    import torch.nn.functional as F
 
     device = torch.device(device)
     rgb_t = torch.as_tensor(rgb, device=device, dtype=torch.float32)
@@ -3229,19 +3247,17 @@ def make_crop_pair(rgb, depth, mask, poses, K, mesh, diameter_m, crop_ratio, use
     if dia.numel() == 1:
         dia = dia.expand(B)
     tf, bboxes = compute_crop_window(poseA, Ks, crop_ratio, (crop, crop), dia)
+    sample_grid = _crop_sampling_grid(tf, (H, W), (crop, crop))
     # B is the observed image, warped into the crop. RGB is bilinear; depth and mask are nearest.
     # B 是观测图，变到裁剪块里。RGB 用双线性，深度和 mask 用最近邻。
-    rgbBs = kornia.geometry.transform.warp_perspective(
-        rgb_t.permute(0, 3, 1, 2), tf, dsize=(crop, crop), mode="bilinear", align_corners=False
-    )
-    depthBs = kornia.geometry.transform.warp_perspective(
-        depth_t[:, None], tf, dsize=(crop, crop), mode="nearest", align_corners=False
+    rgbBs = F.grid_sample(
+        rgb_t.permute(0, 3, 1, 2), sample_grid, mode="bilinear", padding_mode="zeros", align_corners=False
     )
     # SAPR and WBPS omit the mask channel; skip its full batched warp.
     # SAPR 和 WBPS 不读取 mask 通道，因此跳过整批 mask 透视变换。
     if use_mask:
-        maskBs = kornia.geometry.transform.warp_perspective(
-            mask_t[:, None], tf, dsize=(crop, crop), mode="nearest", align_corners=False
+        maskBs = F.grid_sample(
+            mask_t[:, None], sample_grid, mode="nearest", padding_mode="zeros", align_corners=False
         )
         maskBs = (maskBs > 0).float()
     # A caller may share one observed xyz map across every update and score crop.
@@ -3259,8 +3275,8 @@ def make_crop_pair(rgb, depth, mask, poses, K, mesh, diameter_m, crop_ratio, use
         xyz_full = xyz_1.expand(B, -1, -1, -1)
     else:
         xyz_full = depth2xyzmap_batch(depth_t, Ks).permute(0, 3, 1, 2)
-    xyzBs = kornia.geometry.transform.warp_perspective(
-        xyz_full, tf, dsize=(crop, crop), mode="nearest", align_corners=False
+    xyzBs = F.grid_sample(
+        xyz_full, sample_grid, mode="nearest", padding_mode="zeros", align_corners=False
     )
     rt = runtime_for(device)
     # A is one tile per pose, meters. meshes gives each pose its own mesh.
@@ -3291,15 +3307,14 @@ def make_crop_pair(rgb, depth, mask, poses, K, mesh, diameter_m, crop_ratio, use
         rgb_r, depth_r = rt.render_tiles(
             mesh_ids[0], poseA, bboxes, K_np, H, W, crop, mesh_ids=mesh_ids,
         )
-    if float(rgb_r.detach().max()) <= 1.5:
-        rgbAs = (rgb_r * 255.0).permute(0, 3, 1, 2).contiguous()
-    else:
-        rgbAs = rgb_r.permute(0, 3, 1, 2).contiguous()
+    # OGL's lit_mrt.frag clamps RGB to [0, 1]; NvRuntime has the same contract.
+    # Avoid a GPU scalar read and the redundant *255 /255 round trip per crop.
+    rgbAs_n = rgb_r.permute(0, 3, 1, 2).contiguous().float()
     depthAs = depth_r[:, None].float()
-    maskAs = (depthAs > 0).float()
+    if use_mask:
+        maskAs = (depthAs > 0).float()
     Ks_crop = _crop_adjusted_K(Ks, bboxes.float(), crop, crop)
     xyzAs = depth2xyzmap_batch(depthAs[:, 0], Ks_crop).permute(0, 3, 1, 2)
-    rgbAs_n = rgbAs.float() / 255.0
     rgbBs_n = rgbBs.float() / 255.0
     xyzAs_n = normalize_xyz_maps(xyzAs, poseA, dia)
     xyzBs_n = normalize_xyz_maps(xyzBs, poseA, dia)
