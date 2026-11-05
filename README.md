@@ -239,6 +239,39 @@ avoiding a GPU scalar range check. CPU comparisons against independent Kornia wa
 mask/no-mask inputs and batches 1/2/3/6/12; Jetson latency and pose accuracy still need comparison.
 These preprocessing changes reuse existing engines.
 
+Choose tracking-only work with `--tracking-preset` (initialization keeps its existing recipe):
+
+| Preset | WAPR iterations | SAPR iterations | WBPS candidates | Network calls/frame |
+| --- | ---: | ---: | ---: | ---: |
+| `full` (default) | 3 | 2 | 6 | 6 |
+| `balanced` | 2 | 1 | 3 | 4 |
+| `fast` | 1 | 1 | 3 | 3 |
+| `small-motion` | 0 | 1 | 2 | 2 |
+
+`full` uses the current recipe iteration counts (3/2 by default). It reuses branches only when
+the supplied center and previous poses are exactly equal. In the normal one-object path this
+reduces WAPR crop rows 2→1, SAPR rows 3→2 and scoring crop rows 6→4; WBPS still receives all six
+original candidates in their original order, including duplicates. Add `--no-reuse-tracking`
+with `full` to compare against the previous workload. Different center/previous poses retain
+their separate branches; no reuse crosses object identities.
+
+`balanced`/`fast` score previous, WAPR(center) and SAPR(WAPR(center)); `small-motion` scores
+previous and SAPR(center). Center defaults to the previous pose. Reduced presets change
+candidate scoring and recovery behavior: compare drift, loss rate and score thresholds on
+your hardware. Existing single-object engines support these groups; refinement batch=1 is
+still padded to the engine minimum (currently 2). Actual batch=1 engine export is not included.
+Multi-object reduced presets require `wbps_batch.engine`, not the fixed-six tracking scorer.
+The preset and reuse option are recorded in `session.json`; warmup uses the selected preset.
+
+```bash
+python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
+  --web-host 0.0.0.0 --web-port 8000 --tracking-preset balanced --profile-tracking
+```
+
+Set `tracking_preset: balanced` in YAML for the same behavior. CLI flags override YAML values.
+CPU regression tests verify candidate multiplicity, row reductions and preset routing;
+Jetson FP16 numerical parity and performance still require on-device comparison.
+
 ## Browser demo
 
 ```bash

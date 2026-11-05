@@ -1,25 +1,29 @@
 """One category and one instance, with manual or optional automatic initialization."""
 
 import time
+from functools import partial
 import numpy as np
+from wapr.tracking_config import tracking_settings
 
 from .geometry import check_bbox, valid_pose
 
 
 class PoseSession:
-    """Reuse WAPR's unchanged initialization and six-candidate tracking calls.
+    """Reuse WAPR initialization with configurable tracking-only workloads.
 
     Model initialization is separate so callers may supply the already-prepared
     estimator and mesh. The optional initializer owns automatic detection.
     """
 
     def __init__(self, estimator, mesh, diameter_m, minimum_score=0.5, track_function=None,
-                 initializer=None, detect_interval=1.0):
+                 initializer=None, detect_interval=1.0, tracking_preset="full", reuse_tracking=True):
+        tracking_settings(tracking_preset)
         if not np.isfinite(detect_interval) or detect_interval <= 0:
             raise ValueError("detect_interval must be finite and positive")
         if track_function is None:
             from wapr.tracking import track_many_categories_many_instances
-            track_function = track_many_categories_many_instances
+            track_function = partial(track_many_categories_many_instances,
+                                     tracking_preset=tracking_preset, reuse_tracking=reuse_tracking)
         self.estimator, self.mesh, self.diameter = estimator, mesh, diameter_m
         self.minimum_score = minimum_score
         self.track_function = track_function

@@ -222,6 +222,35 @@ python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-
 已在 CPU 上与独立 Kornia 变换对照，覆盖有/无 mask 和 batch 1/2/3/6/12；
 Jetson 延迟和位姿精度仍需实机对比。这些预处理优化复用已有 engine。
 
+使用 `--tracking-preset` 选择跟踪负载，初始化继续使用原有 recipe：
+
+| 预设 | WAPR迭代 | SAPR迭代 | WBPS候选 | 每帧网络调用 |
+| --- | ---: | ---: | ---: | ---: |
+| `full`（默认） | 3 | 2 | 6 | 6 |
+| `balanced` | 2 | 1 | 3 | 4 |
+| `fast` | 1 | 1 | 3 | 3 |
+| `small-motion` | 0 | 1 | 2 | 2 |
+
+`full` 沿用当前 recipe 的迭代次数，默认3/2；仅在 center 与上一帧位姿完全相同时复用分支。
+普通单目标路径的 WAPR 裁剪行数从2降到1、SAPR 从3降到2、评分裁剪从6降到4；
+WBPS 前向仍接收原来的六个候选、顺序和重复次数。用 `full --no-reuse-tracking`
+对照原负载。center 与上一帧位姿不同时保留独立分支，不跨物体身份复用。
+
+`balanced`/`fast` 评分上一帧、WAPR(center)、SAPR(WAPR(center))；`small-motion`
+评分上一帧和 SAPR(center)。center 默认等于上一帧位姿。减少候选会改变评分和恢复能力，
+需要实测漂移、丢失率并重新评估评分阈值。现有单物体引擎支持这些候选组；修正 batch=1
+仍会补到引擎最小 batch（当前为2），本次未增加真正的 batch=1 引擎导出。
+多物体使用减少候选的预设时，需要 `wbps_batch.engine`，不能使用固定六候选的跟踪评分引擎。
+预设和复用开关写入 `session.json`，预热也使用所选预设。
+
+```bash
+python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
+  --web-host 0.0.0.0 --web-port 8000 --tracking-preset balanced --profile-tracking
+```
+
+也可以在 YAML 中设置 `tracking_preset: balanced`，命令行参数优先。
+CPU 回归测试覆盖候选重复次数、裁剪行数和预设传递；Jetson FP16 数值与性能仍需实机对比。
+
 ## 网页 Demo
 
 ```bash

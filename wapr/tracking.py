@@ -19,7 +19,7 @@ import torch
 
 from wapr import recipe
 from wapr.estimator import _rgb_u8, center_from_mesh, poses_original_to_centered
-from wapr.export_tracking_engine import tracking_hypotheses
+from wapr.tracking_config import FULL_HYPOTHESES as tracking_hypotheses, tracking_settings
 from wapr.nets import _Engine
 from wapr.ogl import depth2xyzmap_batch, make_crop_pair
 from wapr.pose_groups import wbps_group_sizes
@@ -88,14 +88,16 @@ def between_group_of_pose(estimator, pose, rgb, depth_m, mask, K, mesh, center, 
     return between.reshape(-1).detach().float().cpu().numpy()
 
 
-def _tracking_score_engine(estimator, instance_count):
+def _tracking_score_engine(estimator, instance_count, group=6, wapr_rows=2, sapr_rows=3):
     """Use ordinary WBPS for one object; separate grouped engines for several."""
-    group = len(tracking_hypotheses)
     wapr_engine = estimator.nets["wapr_wo_mask"].engine
     sapr_engine = estimator.nets["sapr"].engine
     if wapr_engine is None:
         return None, max(wbps_group_sizes) // group
-    base_capacity = min(int(wapr_engine.max_batch) // 2, int(sapr_engine.max_batch) // 3)
+    capacities = [int(sapr_engine.max_batch) // sapr_rows]
+    if wapr_rows:
+        capacities.append(int(wapr_engine.max_batch) // wapr_rows)
+    base_capacity = min(capacities)
     if instance_count == 1:
         # wbps.engine accepts one complete dynamic group, including L=6.
         # A separate object-axis engine is needed only for multiple objects.
@@ -103,6 +105,9 @@ def _tracking_score_engine(estimator, instance_count):
     engine_dir = Path(recipe.engine_file("wbps")).parent
     if (engine_dir / "wbps_batch.engine").is_file():
         return None, min(base_capacity, int(estimator.nets["wbps"].engine.max_batch) // group)
+    if group != len(tracking_hypotheses):
+        raise FileNotFoundError("Reduced multi-object tracking requires wbps_batch.engine: "
+                                "python -m wapr.export_engines --object-mode multi --engine wbps_batch")
     score_engine = getattr(estimator, "tracking_score_engine", None)
     if score_engine is None:
         path = engine_dir / "wbps_tracking.engine"
@@ -116,8 +121,65 @@ def _tracking_score_engine(estimator, instance_count):
     return score_engine, min(base_capacity, int(score_engine.max_batch) // group)
 
 
-def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
-    """Batch the six-candidate pose update for one or several tracked instances.
+def _build_tracking_candidates(previous, centered, same_start, settings, reuse, refine):
+    """Reuse only branches known identical from their CPU input poses.
+
+    No approximate pose comparisons, GPU uniqueness scans or cross-object reuse.
+    Return every scoring candidate, including duplicates in the full preset.
+    """
+    count = len(previous)
+    if len(settings.hypotheses) != 6:
+        owners = list(range(count))
+        if settings.wapr_iters:
+            wapr = refine("wapr_wo_mask", centered, owners, settings.wapr_iters)
+            sapr = refine("sapr", wapr, owners, settings.sapr_iters)
+            candidates = torch.stack((previous, wapr, sapr), dim=1)
+        else:
+            sapr = refine("sapr", centered, owners, settings.sapr_iters)
+            candidates = torch.stack((previous, sapr), dim=1)
+        rows = list(range(count * len(settings.hypotheses)))
+        return candidates, rows, rows
+
+    wapr_inputs, wapr_owners, wapr_indices = [], [], []
+    for index in range(count):
+        first = len(wapr_inputs)
+        wapr_inputs.append(centered[index])
+        wapr_owners.append(index)
+        if not (reuse and same_start[index]):
+            wapr_inputs.append(previous[index])
+            wapr_owners.append(index)
+        wapr_indices.extend((first, first if reuse and same_start[index] else first + 1))
+    wapr_unique = refine("wapr_wo_mask", torch.stack(wapr_inputs), wapr_owners, settings.wapr_iters)
+    wapr = wapr_unique[torch.tensor(wapr_indices, device=previous.device)].reshape(count, 2, 4, 4)
+
+    sapr_inputs, sapr_owners, sapr_indices = [], [], []
+    for index in range(count):
+        first = len(sapr_inputs)
+        sapr_inputs.extend((centered[index], wapr[index, 0]))
+        sapr_owners.extend((index, index))
+        if not (reuse and same_start[index]):
+            sapr_inputs.append(wapr[index, 1])
+            sapr_owners.append(index)
+        sapr_indices.extend((first, first + 1, first + 1 if reuse and same_start[index] else first + 2))
+    sapr_unique = refine("sapr", torch.stack(sapr_inputs), sapr_owners, settings.sapr_iters)
+    sapr = sapr_unique[torch.tensor(sapr_indices, device=previous.device)].reshape(count, 3, 4, 4)
+    candidates = torch.stack((previous, centered, wapr[:, 0], sapr[:, 0], sapr[:, 1], sapr[:, 2]), dim=1)
+
+    crop_rows, restore_rows = [], []
+    for index in range(count):
+        offset = len(crop_rows)
+        if reuse and same_start[index]:
+            crop_rows.extend(index * 6 + value for value in (0, 2, 3, 4))
+            restore_rows.extend(offset + value for value in (0, 0, 1, 2, 3, 3))
+        else:
+            crop_rows.extend(range(index * 6, (index + 1) * 6))
+            restore_rows.extend(range(offset, offset + 6))
+    return candidates, crop_rows, restore_rows
+
+
+def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances,
+                                        tracking_preset="full", reuse_tracking=True):
+    """Batch a configurable pose update for one or several tracked instances.
 
     批量执行一个或多个跟踪实例的六候选位姿更新。
 
@@ -129,14 +191,25 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
     相机、米）。可选 center_pose_4x4 保留原旋转，平移来自传播区域与传感器
     深度；未提供时使用上一帧位姿。obj_id 是可选类别信息。
 
-    WAPR/SAPR and WBPS run across instances; six hypotheses remain an independent
-    score group per instance. A single object uses wbps.engine directly. Multiple
+    tracking_preset selects tracking-only iterations and scoring hypotheses.
+    full keeps the original six positions/multiplicities; balanced/fast use
+    previous, WAPR(center), SAPR(WAPR(center)); small-motion uses previous and
+    SAPR(center). reuse_tracking only reuses full-preset branches with exactly
+    equal input poses, and restores all six rows before WBPS attention.
+    These presets never modify initialization settings in recipe.py.
+
+    WAPR/SAPR and WBPS run across instances; each object's hypotheses remain an independent
+    score group. A single object uses wbps.engine directly. Multiple
     objects use wbps_batch.engine, or the explicitly
     exported six-hypothesis tracking engine. Torch also scores groups together. Larger lists
     are chunked at the engine row limit. Empty input returns []. No GT or mask
     is read here, and no ID assignment, redetection, or automatic rescue occurs.
     within_group selects the pose; between_group is the complete group's maximum.
-    WAPR/SAPR 与 WBPS 跨实例批量计算，每个实例的六个候选姿态仍独立评分。
+    WAPR/SAPR 与 WBPS 跨实例批量计算，每个实例的候选姿态仍独立评分。
+    full 保留原六候选及重复次数；balanced/fast 使用上一帧、WAPR(center)、
+    SAPR(WAPR(center))；small-motion 使用上一帧和 SAPR(center)。
+    reuse_tracking 只复用输入位姿完全相同的 full 分支，并在评分前恢复六行。
+    跟踪预设不会修改 recipe.py 的初始化配置。
     TensorRT 单物体直接使用 wbps.engine，多物体使用 wbps_batch.engine 或显式导出的
     六候选跟踪引擎；torch 路径同样批量计算评分。超过引擎行数
     上限时分块。空列表返回 []。此处不读取真值或 mask，不分配身份、不重新
@@ -145,6 +218,7 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
     """
     if not instances:
         return []
+    settings = tracking_settings(tracking_preset)
     rgb_u8 = _rgb_u8(rgb)
     depth = np.asarray(depth_m, dtype=np.float32)
     if depth.ndim == 3:
@@ -162,6 +236,7 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
     diameters = []
     previous = []
     centered = []
+    same_start = []
     prepared_meshes = estimator._pose_meshes([item["mesh"] for item in instances])
     prepared_ids = [estimator.renderer.cached_mesh_id(mesh) for mesh in prepared_meshes]
     for index, item in enumerate(instances):
@@ -183,9 +258,11 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
         diameters.append(diameter)
         previous.append(pose)
         centered.append(center_pose)
+        same_start.append(np.array_equal(center_pose, pose))
 
-    group = len(tracking_hypotheses)
-    score_engine, objects_per_batch = _tracking_score_engine(estimator, len(instances))
+    group = len(settings.hypotheses)
+    score_engine, objects_per_batch = _tracking_score_engine(estimator, len(instances), group,
+                                                           settings.wapr_rows, settings.sapr_rows)
     if objects_per_batch < 1:
         raise RuntimeError("Engine profile cannot hold one tracking instance")
     rgb_device = torch.as_tensor(rgb_u8, device=estimator.device, dtype=torch.float32)
@@ -202,48 +279,43 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
         batch_centers = np.stack(centers[start:stop]).astype(np.float32)
         batch_diameters = np.asarray(diameters[start:stop], dtype=np.float32)
         batch_meshes = meshes[start:stop]
-        # Two WAPR prefixes and three SAPR prefixes are batched across all
-        # instances; loops below only assemble mesh rows and output records.
-        # 两个 WAPR 前缀和三个 SAPR 前缀跨全部实例批量计算；下面的循环只组织网格
-        # 行与输出记录，不逐物体调用神经网络。
-        wapr_in = torch.stack((center_t, previous_t), dim=1).reshape(count * 2, 4, 4)
-        with pose_component_timer('WAPR', estimator.device):
-            wapr_out = estimator._refine(
-                estimator.nets["wapr_wo_mask"], wapr_in, rgb_device, depth_device, mask_device,
-                K, batch_meshes[0], np.repeat(batch_centers, 2, axis=0), np.repeat(batch_diameters, 2),
-                iters=recipe.wapr_iters, max_rot=recipe.wapr_max_rot_rad,
-                crop_ratio=recipe.refine_crop_ratio, use_mask=False,
-                meshes=[mesh for mesh in batch_meshes for _ in range(2)],
-                group_size=2,
-                observed_xyz=observed_xyz,
-                mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(2)],
-            ).reshape(count, 2, 4, 4)
-        sapr_in = torch.stack((center_t, wapr_out[:, 0], wapr_out[:, 1]), dim=1).reshape(count * 3, 4, 4)
-        with pose_component_timer('SAPR', estimator.device):
-            sapr_out = estimator._refine(
-                estimator.nets["sapr"], sapr_in, rgb_device, depth_device, mask_device,
-                K, batch_meshes[0], np.repeat(batch_centers, 3, axis=0), np.repeat(batch_diameters, 3),
-                iters=recipe.sapr_iters, max_rot=recipe.sapr_max_rot_rad,
-                crop_ratio=recipe.refine_crop_ratio, use_mask=False,
-                meshes=[mesh for mesh in batch_meshes for _ in range(3)],
-                group_size=3,
-                observed_xyz=observed_xyz,
-                mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(3)],
-            ).reshape(count, 3, 4, 4)
-        candidates = torch.stack((previous_t, center_t, wapr_out[:, 0], sapr_out[:, 0],
-                                  sapr_out[:, 1], sapr_out[:, 2]), dim=1)
+        def refine_rows(name, poses, owners, iters):
+            stage = "SAPR" if name == "sapr" else "WAPR"
+            with pose_component_timer(stage, estimator.device):
+                return estimator._refine(
+                    estimator.nets[name], poses, rgb_device, depth_device, mask_device,
+                    K, batch_meshes[0], batch_centers[owners], batch_diameters[owners],
+                    iters=iters,
+                    max_rot=recipe.sapr_max_rot_rad if name == "sapr" else recipe.wapr_max_rot_rad,
+                    crop_ratio=recipe.refine_crop_ratio, use_mask=False,
+                    meshes=[batch_meshes[index] for index in owners], group_size=None,
+                    observed_xyz=observed_xyz,
+                    mesh_ids=[prepared_ids[start + index] for index in owners],
+                )
+
+        candidates, crop_rows, restore_rows = _build_tracking_candidates(
+            previous_t, center_t, same_start[start:stop], settings, reuse_tracking, refine_rows)
         with pose_component_timer('WBPS', estimator.device):
-            score_centers = np.repeat(batch_centers, group, axis=0)
-            score_poses = poses_original_to_centered(candidates.reshape(count * group, 4, 4), score_centers)
-            with pose_component_timer('WBPS crop', estimator.device):
+            crop_owners = np.asarray(crop_rows) // group
+            score_centers = batch_centers[crop_owners]
+            scoring_poses = candidates.reshape(count * group, 4, 4)
+            if len(crop_rows) != count * group:
+                scoring_poses = scoring_poses[torch.tensor(crop_rows, device=estimator.device)]
+            score_poses = poses_original_to_centered(scoring_poses, score_centers)
+            with pose_component_timer("WBPS crop", estimator.device):
                 A, B, _poses, _diameters = make_crop_pair(
                     rgb_device, depth_device, mask_device, score_poses, K, batch_meshes[0],
-                    np.repeat(batch_diameters, group), crop_ratio=recipe.wbps_crop_ratio,
+                    batch_diameters[crop_owners], crop_ratio=recipe.wbps_crop_ratio,
                     use_mask=False, device=estimator.device,
-                    meshes=[mesh for mesh in batch_meshes for _ in range(group)],
+                    meshes=[batch_meshes[index] for index in crop_owners],
                     observed_xyz=observed_xyz,
-                    mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(group)],
+                    mesh_ids=[prepared_ids[start + index] for index in crop_owners],
                 )
+                if len(crop_rows) != count * group:
+                    # Restore multiplicity/order BEFORE WBPS attention. Six scoring
+                    # candidates remain six candidates even when only four crops ran.
+                    restore = torch.tensor(restore_rows, device=estimator.device)
+                    A, B = A[restore], B[restore]
             with pose_component_timer('WBPS network', estimator.device):
                 with torch.no_grad():
                     if score_engine is None:
@@ -267,7 +339,7 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
             item = instances[start + index]
             pose = selected[index]
             row = {"track_id": item["track_id"], "pose_4x4": pose, "R": pose[:3, :3].copy(),
-                   "t_m": pose[:3, 3].copy(), "hypothesis": tracking_hypotheses[int(choices[index])],
+                   "t_m": pose[:3, 3].copy(), "hypothesis": settings.hypotheses[int(choices[index])],
                    "hypothesis_index": int(choices[index]), "between_group": float(group_between[index]),
                    "score_6d": (100.0 - float(group_between[index])) / 200.0}
             if "obj_id" in item:

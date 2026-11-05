@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from wapr.nets import _Engine, load_net
+from wapr.nets import _Engine, NetRunner, load_net
 from wapr.trt_memory import SharedExecutionMemory
 from wapr.trt_compat import network_flags, workspace_bytes
 
@@ -137,6 +137,15 @@ class EngineAPITests(unittest.TestCase):
 
 
 class LoadingTests(unittest.TestCase):
+    def test_single_refinement_branch_is_padded_to_existing_engine_minimum(self):
+        engine = SimpleNamespace(min_batch=2, max_batch=12, run=Mock(return_value={
+            "trans": torch.ones(2, 3), "rot": torch.zeros(2, 3)}))
+        runner = NetRunner("sapr", None, engine)
+        output = runner(torch.zeros(1, 6, 2, 2), torch.zeros(1, 6, 2, 2))
+        feeds = engine.run.call_args.args[0]
+        self.assertEqual(feeds["A"].shape[0], 2)
+        self.assertEqual(output["trans"].shape[0], 1)
+
     def test_trt_only_does_not_construct_or_load_a_torch_model(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "wapr_wo_mask.engine"

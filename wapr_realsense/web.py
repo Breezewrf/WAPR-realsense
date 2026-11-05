@@ -267,6 +267,7 @@ def track_camera(args, state):
             "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend,
             "object_mode": args.object_mode,
             "profile_tracking": args.profile_tracking,
+            "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
             "init": args.init, "web": True, "minimum_score": args.min_score,
             "camera_frame": args.camera_frame, "object_frame": args.object_frame,
             "pose_convention": "original_scaled_mesh_to_color_optical_frame",
@@ -293,12 +294,14 @@ def track_camera(args, state):
                 for _ in range(3):
                     track_many_categories_many_instances(estimator, frame.rgb, depth, frame.K, [{
                         "track_id": 1, "obj_id": 1, "mesh": prepared,
-                        "diameter_m": diameter, "pose_4x4": pose}])
+                        "diameter_m": diameter, "pose_4x4": pose}],
+                        tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking)
             print_timing("WARMUP", f"WAPR tracking: total={timer.elapsed_ms:.2f} ms | "
                          f"avg={timer.elapsed_ms / 3:.2f} ms | calls=3")
             print_timing("WARMUP", f"Startup total={(time.perf_counter() - started) * 1000:.2f} ms")
             session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
-                                  initializer=initializer, detect_interval=args.detect_interval)
+                                  initializer=initializer, detect_interval=args.detect_interval,
+                                  tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking)
             state.set_status("INITIALIZED")
             active, number, count, manual_attempts = False, frame.number, 0, 0
             while not state.stop.is_set() and (not args.max_frames or count < args.max_frames):

@@ -26,14 +26,12 @@ from wapr.model_metadata import checkpoint_metadata, write_onnx_metadata, read_o
 from wapr.export_engines import _build_fp16_engine, release_export_memory
 from wapr.nets import load_net
 from wapr.pose_groups import wbps_group_sizes
+from wapr.tracking_config import FULL_HYPOTHESES
 
 
 # Preserve the six candidates used by the one-instance tracking recipe.
 # 保留单实例跟踪配置使用的六种候选。
-tracking_hypotheses = (
-    "previous", "depth_center", "wapr_center", "sapr_center",
-    "sapr_wapr_center", "sapr_wapr_previous",
-)
+tracking_hypotheses = FULL_HYPOTHESES
 
 
 def rank_tracking_tokens(tokens, block):

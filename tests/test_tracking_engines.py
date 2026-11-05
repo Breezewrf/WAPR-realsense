@@ -39,7 +39,9 @@ class TrackingEngineTests(unittest.TestCase):
         pose = np.eye(4, dtype=np.float32)
         pose[2, 3] = 1
         item = {"track_id": 1, "mesh": mesh, "diameter_m": 0.2, "pose_4x4": pose}
+        crop_batches = []
         def crop(rgb, depth, mask, poses, *args, **kwargs):
+            crop_batches.append(len(poses))
             A = torch.zeros(len(poses), 6, 2, 2)
             return A, A.clone(), poses.clone(), torch.full((len(poses),), 0.2)
 
@@ -48,11 +50,21 @@ class TrackingEngineTests(unittest.TestCase):
              patch("wapr.tracking.depth2xyzmap_batch", return_value=torch.zeros(1, 2, 2, 3)), \
              patch("torch.cuda.synchronize") as synchronize:
             inputs = (estimator, np.zeros((2, 2, 3), np.uint8), np.ones((2, 2), np.float32), np.eye(3), [item])
-            baseline = track_many_categories_many_instances(*inputs)
+            baseline = track_many_categories_many_instances(*inputs, reuse_tracking=False)
+            self.assertEqual(crop_batches, [2, 2, 2, 3, 3, 6])
+            crop_batches.clear()
             synchronize.assert_not_called()
             with TimingCollector(profile_pose=True) as components:
                 profiled = track_many_categories_many_instances(*inputs)
+            self.assertEqual(crop_batches, [1, 1, 1, 2, 2, 4])
             self.assertGreater(synchronize.call_count, 0)
+            for preset, expected in (("balanced", [1, 1, 1, 3]), ("fast", [1, 1, 3]),
+                                      ("small-motion", [1, 2])):
+                crop_batches.clear()
+                reduced = track_many_categories_many_instances(*inputs, tracking_preset=preset)
+                self.assertEqual(crop_batches, expected)
+                self.assertEqual(len(reduced), 1)
+                self.assertTrue(np.isfinite(reduced[0]["pose_4x4"]).all())
         for name, count in (("WAPR", 1), ("WAPR crop", 3), ("WAPR network", 3),
                             ("SAPR", 1), ("SAPR crop", 2), ("SAPR network", 2),
                             ("WBPS", 1), ("WBPS crop", 1), ("WBPS network", 1)):

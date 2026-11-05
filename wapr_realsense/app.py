@@ -14,6 +14,7 @@ import numpy as np
 import yaml
 
 from wapr.timing import ComponentTimer, TimingCollector, TrackingTiming, print_timing
+from wapr.tracking_config import TRACKING_PRESETS
 
 from .camera import RGBDFrame, RealSenseCamera
 from .geometry import check_bbox, draw_pose, load_mesh
@@ -61,6 +62,13 @@ def parse_args(argv=None):
     parser.add_argument("--backend", choices=["trt", "torch"], default="trt")
     parser.add_argument("--object-mode", choices=["single", "multi"], default="single",
                         help="TensorRT engine capacity: compact single-object or full multi-object profiles")
+    parser.add_argument("--tracking-preset", choices=TRACKING_PRESETS, default="full",
+                        help="Tracking workload only: full, balanced (2/1 iterations), fast (1/1), small-motion (SAPR only)")
+    reuse_options = parser.add_mutually_exclusive_group()
+    reuse_options.add_argument("--reuse-tracking", action="store_true", default=True,
+                              help="Reuse identical full-preset branches and crops (default)")
+    reuse_options.add_argument("--no-reuse-tracking", dest="reuse_tracking", action="store_false",
+                              help="Disable identical-branch/crop reuse for a full-preset baseline comparison")
     parser.add_argument("--init", choices=["roi", "auto"], default="roi",
                         help="Manual ROI (default) or GroundingDINO/SAM2/DINOv2 CAD detection")
     parser.add_argument("--detect-interval", type=float, default=1.0, help="Seconds between unsuccessful auto searches")
@@ -265,6 +273,7 @@ def main(argv=None):
         "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend,
         "object_mode": args.object_mode, "init": args.init,
         "profile_tracking": args.profile_tracking,
+        "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
         "automatic_detection": None if args.init == "roi" else {
             "interval_s": args.detect_interval, "score_2d_min": args.detect_score,
@@ -278,7 +287,8 @@ def main(argv=None):
     try:
         initializer = build_initializer(args, estimator, mesh, prepared, diameter)
         session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
-                              initializer=initializer, detect_interval=args.detect_interval)
+                              initializer=initializer, detect_interval=args.detect_interval,
+                              tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking)
         if args.replay:
             last_frame = replay(args, session, mesh, output, writer, tracking_timing)
             return
