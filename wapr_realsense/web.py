@@ -248,6 +248,8 @@ def track_camera(args, state):
     from .initialization import build_initializer, warmup_pose_inputs
     from .output import PoseWriter, pose_record
     from .tracker import PoseSession
+    from dataclasses import asdict
+    from .kalman import settings_from_args
 
     if not torch.cuda.is_available():
         raise RuntimeError("WAPR requires working CUDA PyTorch")
@@ -268,6 +270,7 @@ def track_camera(args, state):
             "object_mode": args.object_mode,
             "profile_tracking": args.profile_tracking,
             "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
+            "kalman_motion_prediction": asdict(settings_from_args(args)),
             "init": args.init, "web": True, "minimum_score": args.min_score,
             "camera_frame": args.camera_frame, "object_frame": args.object_frame,
             "pose_convention": "original_scaled_mesh_to_color_optical_frame",
@@ -301,7 +304,8 @@ def track_camera(args, state):
             print_timing("WARMUP", f"Startup total={(time.perf_counter() - started) * 1000:.2f} ms")
             session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
                                   initializer=initializer, detect_interval=args.detect_interval,
-                                  tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking)
+                                  tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking,
+                                  kalman_settings=settings_from_args(args))
             state.set_status("INITIALIZED")
             active, number, count, manual_attempts = False, frame.number, 0, 0
             while not state.stop.is_set() and (not args.max_frames or count < args.max_frames):

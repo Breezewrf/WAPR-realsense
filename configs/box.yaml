@@ -3,6 +3,14 @@ mesh_unit: m
 mesh_scale: 1.0
 backend: trt
 
+kalman_motion_prediction:
+  activate: true
+  translation_measurement_std_m: 0.01
+  rotation_measurement_std_rad: 0.05
+  translation_acceleration_std_m_s2: 1.0
+  rotation_acceleration_std_rad_s2: 3.0
+  max_dt_s: 0.5
+
 groundingdino_sam2_dinov2_detect:
   activate: false  # false: manual ROI; true: automatic initialization/recovery
   use_sam2: true   # false: use bbox input

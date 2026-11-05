@@ -271,6 +271,45 @@ python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-
 Set `tracking_preset: balanced` in YAML for the same behavior. CLI flags override YAML values.
 CPU regression tests verify candidate multiplicity, row reductions and preset routing.
 
+### Kalman motion prediction
+
+The sample target YAML configs enable a constant-velocity pose predictor. It supplies the
+initial pose for WAPR tracking in every preset, including the browser interface. Outputs
+remain accepted WAPR estimates; the filter does not replace them with smoothed or predicted
+poses. Runs without a config default to disabled; use `--kalman` or `--no-kalman` to override.
+
+```yaml
+kalman_motion_prediction:
+  activate: true
+  translation_measurement_std_m: 0.01
+  rotation_measurement_std_rad: 0.05
+  translation_acceleration_std_m_s2: 1.0
+  rotation_acceleration_std_rad_s2: 3.0
+  max_dt_s: 0.5
+```
+
+```bash
+python -m wapr_realsense --config configs/box.yaml --kalman
+# Compare using the same tracking preset and input:
+python -m wapr_realsense --config configs/box.yaml --no-kalman
+```
+
+Measurement standard deviations set how strongly accepted WAPR poses correct the filter;
+larger values trust the motion model more. Acceleration standard deviations control how
+quickly velocity can change; larger values allow faster adaptation. These are starting
+parameters, not calibrated sensor uncertainties. All numeric settings must be positive and finite.
+The filter uses actual sensor timestamp intervals (host reception time if unavailable), a
+12-dimensional position/rotation-error/velocity state, and SO(3) rotation increments.
+Duplicate/backward timestamps, clock-domain changes or gaps exceeding `max_dt_s` discard
+stale velocity. Initialization, reset and tracking loss also restart the filter. Prediction
+behind the camera falls back to the last accepted pose. Single-frame loss/reinitialization
+rules still apply; this addition does not provide occlusion recovery.
+
+The design references [FoundationPose++'s Kalman motion predictor](https://github.com/teal024/FoundationPose-plus-plus/blob/master/src/utils/kalman_filter_6d.py),
+with sensor-time prediction and rotation errors replacing fixed time steps and Euler angles.
+Settings are saved in `session.json`. CPU tests cover synthetic motion prediction and lifecycle
+routing; improvement on live RGB-D input and Jetson overhead still require measurement.
+
 ### Jetson tracking measurements
 
 Orin NX 16GB, JetPack 5.1.1 / CUDA 11.4, TensorRT 8.5.2.2,

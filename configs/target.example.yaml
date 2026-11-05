@@ -2,6 +2,8 @@ mesh: ../assets/meshes/your_target/model.obj
 mesh_unit: m
 mesh_scale: 1.0
 backend: trt
+kalman_motion_prediction:
+  activate: true
 groundingdino_sam2_dinov2_detect:
   activate: false
   use_sam2: true

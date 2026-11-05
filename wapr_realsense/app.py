@@ -3,6 +3,7 @@
 import argparse
 from contextlib import nullcontext
 from datetime import datetime
+from dataclasses import asdict, fields
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from .geometry import check_bbox, draw_pose, load_mesh
 from .output import PoseWriter, pose_record, save_snapshot
 from .tracker import PoseSession
 from .initialization import build_initializer
+from .kalman import KalmanSettings, settings_from_args
 
 
 def _flatten_detection_config(config):
@@ -64,6 +66,14 @@ def parse_args(argv=None):
                         help="TensorRT engine capacity: compact single-object or full multi-object profiles")
     parser.add_argument("--tracking-preset", choices=TRACKING_PRESETS, default="full",
                         help="Tracking workload only: full, balanced (2/1 iterations), fast (1/1), small-motion (SAPR only)")
+    kalman_options = parser.add_mutually_exclusive_group()
+    kalman_options.add_argument("--kalman", dest="kalman_activate", action="store_true", default=False,
+                                help="Predict the current pose before WAPR tracking")
+    kalman_options.add_argument("--no-kalman", dest="kalman_activate", action="store_false")
+    for field in fields(KalmanSettings):
+        if field.name != "activate":
+            parser.add_argument("--kalman-" + field.name.replace("_", "-"), type=float,
+                                default=field.default)
     reuse_options = parser.add_mutually_exclusive_group()
     reuse_options.add_argument("--reuse-tracking", action="store_true", default=True,
                               help="Reuse identical full-preset branches and crops (default)")
@@ -112,6 +122,18 @@ def parse_args(argv=None):
             config = yaml.safe_load(content)
             if not isinstance(config, dict):
                 raise ValueError("Configuration must be a mapping")
+            section_name = "kalman_motion_prediction"
+            kalman_names = {field.name: "kalman_" + field.name for field in fields(KalmanSettings)}
+            if any(name in config for name in kalman_names.values()):
+                raise ValueError("Configure Kalman options inside %s" % section_name)
+            if section_name in config:
+                section = config.pop(section_name)
+                if not isinstance(section, dict):
+                    raise ValueError("%s must be a mapping" % section_name)
+                for name, value in section.items():
+                    if name not in kalman_names:
+                        raise ValueError("Unknown configuration field: %s.%s" % (section_name, name))
+                    config[kalman_names[name]] = value
             config = _flatten_detection_config(config)
         except (OSError, ValueError, yaml.YAMLError) as error:
             parser.error("Cannot read configuration: %s" % error)
@@ -145,6 +167,10 @@ def parse_args(argv=None):
                 parser.error("Invalid value for configuration field %s: %s" % (name, value))
             parser.set_defaults(**{name: value})
     args = parser.parse_args(argv)
+    try:
+        settings_from_args(args)
+    except ValueError as error:
+        parser.error(str(error))
     if args.web_demo:
         args.web = True
     if not 1 <= args.web_port <= 65535:
@@ -274,6 +300,7 @@ def main(argv=None):
         "object_mode": args.object_mode, "init": args.init,
         "profile_tracking": args.profile_tracking,
         "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
+        "kalman_motion_prediction": asdict(settings_from_args(args)),
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
         "automatic_detection": None if args.init == "roi" else {
             "interval_s": args.detect_interval, "score_2d_min": args.detect_score,
@@ -288,7 +315,8 @@ def main(argv=None):
         initializer = build_initializer(args, estimator, mesh, prepared, diameter)
         session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
                               initializer=initializer, detect_interval=args.detect_interval,
-                              tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking)
+                              tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking,
+                              kalman_settings=settings_from_args(args))
         if args.replay:
             last_frame = replay(args, session, mesh, output, writer, tracking_timing)
             return

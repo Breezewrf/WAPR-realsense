@@ -251,6 +251,41 @@ python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-
 也可以在 YAML 中设置 `tracking_preset: balanced`，命令行参数优先。
 CPU 回归测试覆盖候选重复次数、裁剪行数和预设传递。
 
+### Kalman 运动预测
+
+目标 YAML 示例默认开启匀速位姿预测，支持所有跟踪预设和 Web 界面。预测结果作为 WAPR
+跟踪初值，对外仍输出通过评分的 WAPR 位姿。无配置启动时默认关闭，可用 `--kalman` 或
+`--no-kalman` 覆盖配置。
+
+```yaml
+kalman_motion_prediction:
+  activate: true
+  translation_measurement_std_m: 0.01
+  rotation_measurement_std_rad: 0.05
+  translation_acceleration_std_m_s2: 1.0
+  rotation_acceleration_std_rad_s2: 3.0
+  max_dt_s: 0.5
+```
+
+```bash
+python -m wapr_realsense --config configs/box.yaml --kalman
+# 使用相同跟踪预设和输入对比：
+python -m wapr_realsense --config configs/box.yaml --no-kalman
+```
+
+观测标准差控制通过评分的 WAPR 位姿对滤波器的修正强度，数值越大越信任运动预测。
+加速度标准差控制速度变化的灵活度，数值越大适应变化越快。这些默认值是起始参数，
+不是标定得到的传感器不确定度；数值参数均须有限且大于零。
+滤波器使用相机时间戳的实际间隔，时间戳不可用时使用主机接收时间；状态包含平移、
+旋转误差、线速度和角速度共 12 维，旋转通过 SO(3) 增量更新。
+时间戳重复、倒退、时钟域变化或间隔超过 `max_dt_s` 时丢弃旧速度；初始化、重置和
+跟踪丢失也会重新建立滤波状态。预测深度非正时退回最近可靠位姿。
+当前单帧失败触发丢失及重新初始化的规则继续生效，此功能不提供遮挡恢复。
+
+设计参考 [FoundationPose++ 的 Kalman 运动预测](https://github.com/teal024/FoundationPose-plus-plus/blob/master/src/utils/kalman_filter_6d.py)，
+使用传感器时间间隔及旋转误差替代固定步长和欧拉角。配置记录在 `session.json`。
+CPU 测试覆盖合成运动预测和跟踪状态传递；真实 RGB-D 跟踪收益及 Jetson 开销仍需实测。
+
 ### Jetson 跟踪实测
 
 Orin NX 16GB 实机日志：JetPack 5.1.1 / CUDA 11.4、TensorRT 8.5.2.2、

@@ -6,6 +6,7 @@ import numpy as np
 from wapr.tracking_config import tracking_settings
 
 from .geometry import check_bbox, valid_pose
+from .kalman import PoseKalman
 
 
 class PoseSession:
@@ -16,7 +17,8 @@ class PoseSession:
     """
 
     def __init__(self, estimator, mesh, diameter_m, minimum_score=0.5, track_function=None,
-                 initializer=None, detect_interval=1.0, tracking_preset="full", reuse_tracking=True):
+                 initializer=None, detect_interval=1.0, tracking_preset="full", reuse_tracking=True,
+                 kalman_settings=None):
         tracking_settings(tracking_preset)
         if not np.isfinite(detect_interval) or detect_interval <= 0:
             raise ValueError("detect_interval must be finite and positive")
@@ -31,12 +33,21 @@ class PoseSession:
         self.detect_interval = detect_interval
         self.next_detection = 0.0
         self.pose = None
+        self.motion = PoseKalman(kalman_settings) if kalman_settings and kalman_settings.activate else None
+        self.clock_domain = None
 
     def reset(self):
         self.pose = None
         self.next_detection = 0.0
+        if self.motion is not None:
+            self.motion.reset()
+        self.clock_domain = None
 
     def step(self, frame, now=None, bbox=None):
+        if self.motion is not None:
+            domain, timestamp = frame.timestamp_domain, frame.timestamp_ms / 1000.0
+            if not np.isfinite(timestamp):
+                domain, timestamp = "host_monotonic", frame.received_monotonic
         if bbox is not None:
             bbox = check_bbox(bbox, frame.depth_m)
             row = self.estimator.estimate_one_category_one_instance(
@@ -55,9 +66,17 @@ class PoseSession:
                 return "searching", None
             status = "initialized_auto"
         else:
+            prior = self.pose
+            if self.motion is not None:
+                if self.clock_domain != domain:
+                    self.motion.initiate(self.pose, timestamp)
+                prior = self.motion.predict(timestamp)
+                if not np.isfinite(prior).all() or prior[2, 3] <= 0:
+                    self.motion.initiate(self.pose, timestamp)
+                    prior = self.pose
             rows = self.track_function(self.estimator, frame.rgb, frame.depth_m, frame.K, [{
                 "track_id": 1, "obj_id": 1, "mesh": self.mesh,
-                "diameter_m": self.diameter, "pose_4x4": self.pose,
+                "diameter_m": self.diameter, "pose_4x4": prior,
             }])
             row = rows[0] if rows else None
             status = "tracking"
@@ -65,4 +84,10 @@ class PoseSession:
             self.reset()
             return "lost", None
         self.pose = np.asarray(row["pose_4x4"], dtype=np.float32).copy()
+        if self.motion is not None:
+            if status != "tracking":
+                self.motion.initiate(self.pose, timestamp)
+            else:
+                self.motion.update(self.pose)
+            self.clock_domain = domain
         return status, row
