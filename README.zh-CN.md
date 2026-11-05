@@ -42,9 +42,9 @@ box 配置引用本地 `assets/meshes/box/textured_mesh_modified.obj`，单位�
 干净源码不包含这个模型；新机器上自行复制模型，或修改配置中的路径。
 **配置内路径相对配置文件解析，命令行显式参数优先。**
 
-使用互斥的依赖组选择部署平台；普通 `uv sync` 默认选择 `common`。
+使用对应的依赖组选择部署平台；普通 `uv sync` 默认选择 `common`。
 锁文件仅面向 Linux：`common` 为 x86_64 / Python 3.10+，Orin 为 ARM64 / Python 3.8，
-Thor 为 ARM64 / Python 3.12。各项依赖带有环境条件，避免 uv 同时解析全部组时，
+Thor 为 ARM64 / Python 3.12。三套环境在 `tool.uv.environments` 中分别声明，依赖和下载源也带有环境条件，避免 uv 同时解析全部组时，
 将某个平台的 GPU wheel 用于不兼容的系统或 Python 版本。
 
 ```bash

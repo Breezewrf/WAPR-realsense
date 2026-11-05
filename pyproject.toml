@@ -89,12 +89,15 @@ wapr = [
 [tool.setuptools]
 license-files = ["LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt", "THIRD_PARTY_NOTICES.txt"]
 
-# Select exactly one deployment stack. Plain uv sync keeps the desktop default.
+# Platform markers separate GPU stacks. Plain uv sync keeps the desktop default.
 [tool.uv]
 default-groups = ["common"]
 # These GPU distributions are Linux-only; each group further restricts Python/CPU architecture.
-environments = ["sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')"]
-conflicts = [[{group = "common"}, {group = "orin-nx-jetpack511"}, {group = "thor"}]]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+]
 
 [tool.uv.dependency-groups]
 common = {requires-python = ">=3.10,<3.13"}
@@ -118,14 +121,14 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-    {index = "pytorch-cu126", group = "common"},
-    {index = "pytorch-cu130", group = "thor"},
-    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl", group = "orin-nx-jetpack511"},
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'"},
+    {index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'"},
+    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'"},
 ]
 torchvision = [
-    {index = "pytorch-cu126", group = "common"},
-    {index = "pytorch-cu130", group = "thor"},
-    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torchvision-0.16.2+c6f3977-cp38-cp38-linux_aarch64.whl", group = "orin-nx-jetpack511"},
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'"},
+    {index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'"},
+    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torchvision-0.16.2+c6f3977-cp38-cp38-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'"},
 ]
 tensorrt-cu12-bindings = {index = "nvidia"}
 tensorrt-cu12-libs = {index = "nvidia"}
