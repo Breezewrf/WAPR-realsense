@@ -269,8 +269,34 @@ python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-
 ```
 
 Set `tracking_preset: balanced` in YAML for the same behavior. CLI flags override YAML values.
-CPU regression tests verify candidate multiplicity, row reductions and preset routing;
-Jetson FP16 numerical parity and performance still require on-device comparison.
+CPU regression tests verify candidate multiplicity, row reductions and preset routing.
+
+### Jetson tracking measurements
+
+Orin NX 16GB, JetPack 5.1.1 / CUDA 11.4, TensorRT 8.5.2.2,
+torch 2.1.0a0+41361538.nv23.06, MAXN with `jetson_clocks` enabled. Input was a RealSense
+D435I at 640×480/15 Hz, using the box mesh, manual ROI initialization, TensorRT engines,
+shared execution memory and the web interface. Measurements enabled `--profile-tracking
+--timing-interval 5` and exclude startup, warmup and initialization.
+
+| Tracking preset | Approximate mean update time | Observed window-mean range | Time reduction vs. full |
+| --- | ---: | ---: | ---: |
+| `full` | 187 ms | 186.55–188.59 ms | — |
+| `balanced` | 120 ms | 119.00–120.76 ms | 36% |
+| `fast` | 94 ms | 93.44–94.47 ms | 50% |
+| `small-motion` | 58 ms | 57.40–59.42 ms | 69% |
+
+Ranges include partial windows flushed at loss/reinitialization/exit; they are ranges of
+logged averages, not per-frame percentiles. These were separate live runs with different
+manual ROIs, not a controlled replay benchmark. Synchronized profiling adds overhead, and
+the timings exclude camera waiting, pose-file writing, browser encoding and network/display
+latency. At about 58 ms, processing capacity exceeds the 15 Hz camera input; actual pose
+output remains limited by acquisition and other pipeline work.
+
+The the projected bounding box slightly less accurate with `balanced`, `fast`
+and `small-motion`, but provisionally acceptable. Pose accuracy, drift and loss rate have not
+been quantified; FP16 numerical parity is also unverified. `full` remains the default/reference.
+Use the same recorded RGB-D sequence for a controlled accuracy and latency comparison.
 
 ## Browser demo
 

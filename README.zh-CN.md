@@ -249,7 +249,30 @@ python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-
 ```
 
 也可以在 YAML 中设置 `tracking_preset: balanced`，命令行参数优先。
-CPU 回归测试覆盖候选重复次数、裁剪行数和预设传递；Jetson FP16 数值与性能仍需实机对比。
+CPU 回归测试覆盖候选重复次数、裁剪行数和预设传递。
+
+### Jetson 跟踪实测
+
+Orin NX 16GB 实机日志：JetPack 5.1.1 / CUDA 11.4、TensorRT 8.5.2.2、
+torch 2.1.0a0+41361538.nv23.06，使用 MAXN 并开启 `jetson_clocks`。
+输入为 RealSense D435I，640×480、15 Hz；使用 box mesh、手动 ROI 初始化、TensorRT 引擎、
+共享执行内存和 Web 界面。开启 `--profile-tracking --timing-interval 5`，统计不包含启动、预热和初始化。
+
+| 跟踪预设 | 平均更新耗时（约） | 日志窗口均值范围 | 相比 full 减少耗时 |
+| --- | ---: | ---: | ---: |
+| `full` | 187 ms | 186.55–188.59 ms | — |
+| `balanced` | 120 ms | 119.00–120.76 ms | 36% |
+| `fast` | 94 ms | 93.44–94.47 ms | 50% |
+| `small-motion` | 58 ms | 57.40–59.42 ms | 69% |
+
+范围包含丢失、重新初始化或退出时补打的不完整窗口，表示日志中平均值的范围，不是逐帧延迟分位数。
+各模式来自不同的实时运行和手动框选，并非同一段数据的受控回放对比。
+分段计时的 CUDA 同步会增加开销；上述耗时不包含等待相机、写入位姿文件、网页编码及网络/显示延迟。
+约58 ms的处理能力已超过15 Hz相机输入频率，实际位姿输出仍受采集和其他处理开销限制。
+
+操作者观察到 `balanced`、`fast`、`small-motion` 的投影包围框精度略差，但暂时可以接受。
+目前尚未量化位姿精度、漂移和丢失率，FP16 数值等价性也未验证；`full` 继续作为默认和参考模式。
+后续可用同一段录制 RGB-D 回放，进行受控的精度与延迟对比。
 
 ## 网页 Demo
 
