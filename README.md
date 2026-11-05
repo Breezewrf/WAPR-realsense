@@ -63,14 +63,24 @@ TensorRT uses the existing system installation. The desktop `pyproject.toml` and
 still target Python 3.10+. Docker needs the NVIDIA runtime, camera USB access and NVIDIA
 EGL/GL libraries; interactive ROI selection also needs display forwarding. Rebuild the native
 renderer and engines on Orin instead of copying desktop `.so` or `.engine` files. ARM64
-engine builds default to a 1 GiB workspace limit; override it with `WAPR_TRT_WORKSPACE_GB=2`.
-This limit excludes model, activation and total process memory. The operator has verified D435I
-capture, native renderer compilation and EGL/OpenGL initialization. Complete pose inference and
-TensorRT engine builds still need on-device validation. TRT 8.5 exports use opset 16 to decompose
+engine builds default to a 1 GiB workspace limit; the operator built `wapr_w_mask` with
+`WAPR_TRT_WORKSPACE_GB=4` after 1 GiB failed. This is a scratch-space budget for algorithm
+selection, not a total process memory cap; selected algorithms also need scratch space at runtime.
+The operator has verified D435I capture, native rendering and torch ROI tracking (~503–518 ms/frame).
+TensorRT pose inference still needs on-device validation. TRT 8.5 exports use opset 16 to decompose
 LayerNorm into basic operations. Without display forwarding, use `--no-display --bbox X Y W H`
 with coordinates from the current rectified image; save one with
 `--check-camera --output outputs/camera_check`. This Python 3.8 path covers ROI tracking;
 optional SAM2 and other detector dependencies are outside this installation list.
+
+TRT mode loads engines directly without PyTorch network weights. Pose engines share one
+execution-memory buffer sized to their largest requirement, with serialized submissions;
+weights and persistent context state remain separate. Existing engines need no rebuild.
+Check all four engines together with `python scripts/check_trt_memory.py --run` (synthetic
+12/6-candidate inputs, not an accuracy test), then run the application with `--backend trt`.
+`WAPR_TRT_CONTEXT` reports each requirement; `WAPR_TRT_MEMORY` reports the allocated shared buffer.
+This memory path needs Jetson validation. `WAPR_TRT_SHARED_MEMORY=0` restores separate context
+allocations for comparison and may exhaust memory on Orin NX 16GB.
 
 Drag a tight box in the frozen image and press Enter/Space. In the live window:
 `r` reinitializes, `s` saves RGB-D and pose, and `q`/Esc exits.

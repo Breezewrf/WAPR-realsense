@@ -61,12 +61,22 @@ python -m wapr_realsense --config configs/box.yaml --init roi --backend trt
 桌面 `pyproject.toml` 和 `uv.lock` 仍用于 Python 3.10+ 的桌面环境。
 Docker 需要 NVIDIA runtime、相机 USB 设备访问和 NVIDIA EGL/GL 库；使用 ROI 窗口还需要显示转发。
 渲染器和引擎在 Orin 本机重新构建，不复制桌面的 `.so` 或 `.engine`。
-ARM64 导出 workspace 上限默认 1 GiB，可用 `WAPR_TRT_WORKSPACE_GB=2` 调整；
-该上限不包含模型、激活和整个进程的内存。操作者已验证 D435I 取帧、原生渲染器编译及
-EGL/OpenGL 初始化；完整位姿推理和 TensorRT 引擎构建仍待实机验证。TRT 8.5 导出使用
+ARM64 导出 workspace 上限默认 1 GiB；操作者在 1 GiB 失败后，使用
+`WAPR_TRT_WORKSPACE_GB=4` 成功构建 `wapr_w_mask`。此值限制算法选择所需的临时空间，
+不限制整个进程的内存；选中的算法在推理时仍需要临时空间。
+操作者已验证 D435I 取帧、原生渲染及 torch ROI 跟踪（约 503–518 ms/帧）；
+TensorRT 位姿推理仍待实机验证。TRT 8.5 导出使用
 opset 16，将 LayerNorm 展开为基础算子。没有显示转发时使用 `--no-display --bbox X Y W H`，
 框坐标应来自当前校正后的图像；可先用 `--check-camera --output outputs/camera_check` 保存图像。
 此 Python 3.8 路径用于 ROI 跟踪；可选 SAM2 等模块的依赖不包含在该安装清单中。
+
+TRT 模式直接加载引擎，不额外加载 PyTorch 网络权重。位姿引擎串行提交推理，
+共用一块按最大需求分配的执行内存；权重和 context 的持久状态仍各自保留，无须重建已有引擎。
+先运行 `python scripts/check_trt_memory.py --run`，保留四个引擎并测试 12/6 候选的合成输入
+（不验证位姿精度），再用 `--backend trt` 启动应用。
+`WAPR_TRT_CONTEXT` 显示各引擎需求，`WAPR_TRT_MEMORY` 显示实际分配的共享缓冲大小。
+这条内存优化路径尚待 Jetson 验证；`WAPR_TRT_SHARED_MEMORY=0` 恢复各 context 单独分配，
+用于对比时可能再次耗尽 Orin NX 16GB 的内存。
 
 在冻结画面上紧贴目标拖出矩形框，Enter/空格确认。实时窗口中：
 `r` 重新初始化、`s` 保存 RGB-D 与结果、`q`/Esc 退出。

@@ -882,10 +882,17 @@ class WAPREstimator:
                 from wapr.export_engines import main as build_pose_engines
                 print("WAPR_ENGINE_BUILD", {"missing": missing_engines, "device": device}, flush=True)
                 build_pose_engines()
+        # These networks execute in sequence. Avoid reserving a profile-sized
+        # activation/scratch buffer separately for every resident engine.
+        self.execution_memory = None
+        if use_engine and os.environ.get("WAPR_TRT_SHARED_MEMORY", "1") != "0":
+            from wapr.trt_memory import SharedExecutionMemory
+            self.execution_memory = SharedExecutionMemory(device)
         self.nets = {}
         for name in ("wapr_w_mask", "wapr_wo_mask", "sapr", "wbps"):
             engine = recipe.engine_file(name) if use_engine else None
-            self.nets[name] = load_net(name, recipe.weight_file(name), engine=engine, device=device)
+            self.nets[name] = load_net(name, recipe.weight_file(name), engine=engine, device=device,
+                                       execution_memory=self.execution_memory)
             loaded_engine = self.nets[name].engine
             if loaded_engine is not None:
                 expected = (min(wbps_group_sizes), int(recipe.n_view * recipe.n_inplane), max(wbps_group_sizes))
