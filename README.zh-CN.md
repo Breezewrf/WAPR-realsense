@@ -43,6 +43,9 @@ box 配置引用本地 `assets/meshes/box/textured_mesh_modified.obj`，单位�
 **配置内路径相对配置文件解析，命令行显式参数优先。**
 
 使用互斥的依赖组选择部署平台；普通 `uv sync` 默认选择 `common`。
+锁文件仅面向 Linux：`common` 为 x86_64 / Python 3.10+，Orin 为 ARM64 / Python 3.8，
+Thor 为 ARM64 / Python 3.12。各项依赖带有环境条件，避免 uv 同时解析全部组时，
+将某个平台的 GPU wheel 用于不兼容的系统或 Python 版本。
 
 ```bash
 # Laptop: Python 3.10, Torch 2.7.1 / torchvision 0.22.1, CUDA 12.6

@@ -44,6 +44,9 @@ the configuration; source exports do not bundle it. Paths inside a config are re
 Explicit CLI arguments override config values.
 
 Select one mutually exclusive deployment group. Plain `uv sync` defaults to `common`.
+The lock targets Linux only: x86_64 / Python 3.10+ for `common`, ARM64 / Python 3.8
+for Orin, and ARM64 / Python 3.12 for Thor. Dependency markers keep each GPU wheel
+out of incompatible environments while uv resolves all groups for the lockfile.
 
 ```bash
 # Laptop: Python 3.10, Torch 2.7.1 / torchvision 0.22.1, CUDA 12.6
