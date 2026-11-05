@@ -42,33 +42,51 @@ box 配置引用本地 `assets/meshes/box/textured_mesh_modified.obj`，单位�
 干净源码不包含这个模型；新机器上自行复制模型，或修改配置中的路径。
 **配置内路径相对配置文件解析，命令行显式参数优先。**
 
-JetPack 5.1.1 / Python 3.8 的源码运行路径使用 `uv pip`，不执行上面的桌面 `uv sync`。
-先安装对应 Jetson 的 GPU 包；当前操作者已验证 torch `2.1.0a0+41361538.nv23.06`、
-torchvision `0.16.2+c6f3977` 的 CUDA 运算和 NMS，以及 TensorRT `8.5.2.2` Builder。
-在同一个已激活的 `.venv` 中继续：
+使用互斥的依赖组选择部署平台；普通 `uv sync` 默认选择 `common`。
 
 ```bash
-uv pip install -r requirements-jetson.txt
-uv pip check
+# Laptop: Python 3.10, Torch 2.7.1 / torchvision 0.22.1, CUDA 12.6
+uv sync --group common --python 3.10
+
+# Orin NX / JetPack 5.1.1: Python 3.8, verified NVIDIA GPU wheels
+uv sync --no-default-groups --group orin-nx-jetpack511 --python 3.8
+
+# AGX Thor: Python 3.12, PyTorch cu130 + ARM64 ONNX Runtime GPU 1.24.0
+uv sync --no-default-groups --group thor --python 3.12
+```
+
+`common` 保留原桌面的依赖版本和 TensorRT CUDA 12 包；Orin 组沿用
+`requirements-jetson.txt` 的版本约束，Torch 和 torchvision 自动从已验证的 wheel URL 安装。
+Thor 组从 cu130 索引安装 Torch/torchvision，并使用指定的 ONNX Runtime wheel。
+Jetson 两组均不通过 pip 安装 TensorRT，安装完成后链接系统包，且 Python ABI 必须一致：
+
+```bash
+# Orin / Python 3.8
+ln -s /usr/lib/python3.8/dist-packages/tensorrt* .venv/lib/python3.8/site-packages/
+# Thor / Python 3.12
+ln -s /usr/lib/python3.12/dist-packages/tensorrt* .venv/lib/python3.12/site-packages/
+source .venv/bin/activate
+python -c 'import torch, tensorrt; print(torch.__version__, torch.cuda.is_available(), tensorrt.__version__)'
+# Thor only
+python scripts/check_thor.py
+```
+
+不要将 Python 3.10 的 TensorRT 扩展链接进 Python 3.8/3.12 环境。系统 TensorRT
+需与 JetPack 匹配；当前代码支持 Orin 的 8.5 和 Thor 的 10.x，尚不支持 11.x。
+后续再次执行 `uv sync` 时仍需带上所选组参数。Thor 的检查脚本测试 CUDA 运算、NMS、
+TensorRT Builder 和禁止 CPU 回退的 ONNX Runtime 执行；Thor 的相机、渲染和位姿推理仍待实机验证。
+ONNX Runtime 不参与 WAPR 主位姿后端。自动检测模块的可选依赖仍需单独准备。
+
+```bash
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python -m wapr_realsense --check-camera
 python scripts/setup_runtime.py
-python -m wapr.export_engines
-python -m wapr_realsense --config configs/box.yaml --init roi --backend trt
+WAPR_TRT_WORKSPACE_GB=4 python -m wapr.export_engines --object-mode single
+python -m wapr_realsense --config configs/box.yaml --web --web-host 0.0.0.0 --backend trt --object-mode single
 ```
 
-此文件固定已验证的 GPU 包版本，并限制 NumPy/Kornia 等兼容范围；TensorRT 沿用系统安装。
-桌面 `pyproject.toml` 和 `uv.lock` 仍用于 Python 3.10+ 的桌面环境。
-Docker 需要 NVIDIA runtime、相机 USB 设备访问和 NVIDIA EGL/GL 库；使用 ROI 窗口还需要显示转发。
-渲染器和引擎在 Orin 本机重新构建，不复制桌面的 `.so` 或 `.engine`。
-ARM64 导出 workspace 上限默认 1 GiB；操作者在 1 GiB 失败后，使用
-`WAPR_TRT_WORKSPACE_GB=4` 成功构建 `wapr_w_mask`。此值限制算法选择所需的临时空间，
-不限制整个进程的内存；选中的算法在推理时仍需要临时空间。
-操作者已验证 D435I 取帧、原生渲染及 torch ROI 跟踪（约 503–518 ms/帧）；
-TensorRT 位姿推理仍待实机验证。TRT 8.5 导出使用
-opset 16，将 LayerNorm 展开为基础算子。没有显示转发时使用 `--no-display --bbox X Y W H`，
-框坐标应来自当前校正后的图像；可先用 `--check-camera --output outputs/camera_check` 保存图像。
-此 Python 3.8 路径用于 ROI 跟踪；可选 SAM2 等模块的依赖不包含在该安装清单中。
+Jetson 系统或 Docker 仍需 CUDA 编译工具、C++ 编译器、NVIDIA EGL/GL 库和相机 USB 访问。
+引擎和渲染器在目标机器构建，不复制桌面的 `.engine` 或 `.so`。
 
 TRT 模式直接加载引擎，不额外加载 PyTorch 网络权重。位姿引擎串行提交推理，
 共用一块按最大需求分配的执行内存；权重和 context 的持久状态仍各自保留，无须重建已有引擎。

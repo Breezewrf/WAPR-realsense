@@ -7,9 +7,12 @@ name = "wapr-realsense"
 version = "0.1.0"
 description = "RealSense RGB-D single-object 6D pose tracking for robotics, based on WAPR"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.8,<3.13"
 license = {file = "LICENSE"}
-dependencies = [
+dependencies = []
+
+[dependency-groups]
+common = [
     "torch==2.7.1",
     "torchvision==0.22.1",
     "tensorrt-cu12==10.16.1.11",
@@ -31,10 +34,43 @@ dependencies = [
     "pip>=25",
 ]
 
-# Retained for compatibility with earlier installation commands.
-[project.optional-dependencies]
-desktop = []
-export = []
+orin-nx-jetpack511 = [
+    "torch==2.1.0a0+41361538.nv23.06",
+    "torchvision==0.16.2+c6f3977",
+    "numpy>=1.24,<1.25",
+    "scipy",
+    "trimesh",
+    "Pillow",
+    "kornia>=0.7,<0.8",
+    "filelock",
+    "packaging",
+    "huggingface-hub>=0.24,<0.34",
+    "opencv-python<4.12",
+    "pyrealsense2",
+    "PyYAML>=6",
+    "onnx",
+    "pybind11>=2.10",
+    "pip>=24,<25",
+]
+thor = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "scipy",
+    "trimesh",
+    "Pillow",
+    "kornia",
+    "filelock",
+    "packaging",
+    "huggingface-hub>=0.34,<1",
+    "opencv-python",
+    "pyrealsense2",
+    "PyYAML>=6",
+    "onnx",
+    "pybind11",
+    "pip>=25",
+    "onnxruntime-gpu @ https://github.com/ultralytics/assets/releases/download/v0.0.0/onnxruntime_gpu-1.24.0-cp312-cp312-linux_aarch64.whl",
+]
 
 [project.scripts]
 wapr-realsense = "wapr_realsense.app:entrypoint"
@@ -53,10 +89,24 @@ wapr = [
 [tool.setuptools]
 license-files = ["LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt", "THIRD_PARTY_NOTICES.txt"]
 
-# Match the CUDA 12.6 desktop stack used by this project.
+# Select exactly one deployment stack. Plain uv sync keeps the desktop default.
+[tool.uv]
+default-groups = ["common"]
+conflicts = [[{group = "common"}, {group = "orin-nx-jetpack511"}, {group = "thor"}]]
+
+[tool.uv.dependency-groups]
+common = {requires-python = ">=3.10,<3.13"}
+orin-nx-jetpack511 = {requires-python = ">=3.8,<3.9"}
+thor = {requires-python = ">=3.12,<3.13"}
+
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [[tool.uv.index]]
@@ -65,7 +115,15 @@ url = "https://pypi.nvidia.com"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
-tensorrt-cu12-bindings = { index = "nvidia" }
-tensorrt-cu12-libs = { index = "nvidia" }
+torch = [
+    {index = "pytorch-cu126", group = "common"},
+    {index = "pytorch-cu130", group = "thor"},
+    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl", group = "orin-nx-jetpack511"},
+]
+torchvision = [
+    {index = "pytorch-cu126", group = "common"},
+    {index = "pytorch-cu130", group = "thor"},
+    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torchvision-0.16.2+c6f3977-cp38-cp38-linux_aarch64.whl", group = "orin-nx-jetpack511"},
+]
+tensorrt-cu12-bindings = {index = "nvidia"}
+tensorrt-cu12-libs = {index = "nvidia"}

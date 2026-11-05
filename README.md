@@ -43,35 +43,54 @@ With a working cache, run the application directly.
 the configuration; source exports do not bundle it. Paths inside a config are relative to that file.
 Explicit CLI arguments override config values.
 
-For the JetPack 5.1.1 / Python 3.8 source runtime, use `uv pip` instead of the desktop
-`uv sync` above. Install the matching Jetson GPU packages first. The operator has verified
-CUDA operations and NMS with torch `2.1.0a0+41361538.nv23.06`, torchvision `0.16.2+c6f3977`,
-and Builder creation with TensorRT `8.5.2.2`. In that same activated `.venv`, continue with:
+Select one mutually exclusive deployment group. Plain `uv sync` defaults to `common`.
 
 ```bash
-uv pip install -r requirements-jetson.txt
-uv pip check
+# Laptop: Python 3.10, Torch 2.7.1 / torchvision 0.22.1, CUDA 12.6
+uv sync --group common --python 3.10
+
+# Orin NX / JetPack 5.1.1: Python 3.8, verified NVIDIA GPU wheels
+uv sync --no-default-groups --group orin-nx-jetpack511 --python 3.8
+
+# AGX Thor: Python 3.12, PyTorch cu130 + ARM64 ONNX Runtime GPU 1.24.0
+uv sync --no-default-groups --group thor --python 3.12
+```
+
+`common` retains the desktop versions and TensorRT CUDA 12 packages. The Orin group
+uses the constraints from `requirements-jetson.txt` and installs its verified Torch and
+torchvision wheels automatically. Thor uses the cu130 PyTorch index and the supplied
+ONNX Runtime GPU wheel. Neither Jetson group installs TensorRT via pip. Link the system
+package after syncing, with matching Python ABIs:
+
+```bash
+# Orin / Python 3.8
+ln -s /usr/lib/python3.8/dist-packages/tensorrt* .venv/lib/python3.8/site-packages/
+# Thor / Python 3.12
+ln -s /usr/lib/python3.12/dist-packages/tensorrt* .venv/lib/python3.12/site-packages/
+source .venv/bin/activate
+python -c 'import torch, tensorrt; print(torch.__version__, torch.cuda.is_available(), tensorrt.__version__)'
+# Thor only
+python scripts/check_thor.py
+```
+
+Do not link Python 3.10 TensorRT extensions into Python 3.8/3.12 environments. System
+TensorRT must match JetPack; the current runtime supports Orin's 8.5 and Thor's 10.x,
+not 11.x. Repeat the selected group flags on subsequent syncs. The Thor check tests
+CUDA math, NMS, TensorRT Builder and ONNX Runtime CUDA execution without CPU fallback;
+camera, rendering and pose inference still require Thor hardware validation. ONNX Runtime
+is not part of the main WAPR pose backend. Optional detector dependencies remain separate.
+
+```bash
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
 python -m wapr_realsense --check-camera
 python scripts/setup_runtime.py
-python -m wapr.export_engines
-python -m wapr_realsense --config configs/box.yaml --init roi --backend trt
+WAPR_TRT_WORKSPACE_GB=4 python -m wapr.export_engines --object-mode single
+python -m wapr_realsense --config configs/box.yaml --web --web-host 0.0.0.0 --backend trt --object-mode single
 ```
 
-The requirements retain those GPU versions and constrain compatible NumPy/Kornia versions;
-TensorRT uses the existing system installation. The desktop `pyproject.toml` and `uv.lock`
-still target Python 3.10+. Docker needs the NVIDIA runtime, camera USB access and NVIDIA
-EGL/GL libraries; interactive ROI selection also needs display forwarding. Rebuild the native
-renderer and engines on Orin instead of copying desktop `.so` or `.engine` files. ARM64
-engine builds default to a 1 GiB workspace limit; the operator built `wapr_w_mask` with
-`WAPR_TRT_WORKSPACE_GB=4` after 1 GiB failed. This is a scratch-space budget for algorithm
-selection, not a total process memory cap; selected algorithms also need scratch space at runtime.
-The operator has verified D435I capture, native rendering and torch ROI tracking (~503–518 ms/frame).
-TensorRT pose inference still needs on-device validation. TRT 8.5 exports use opset 16 to decompose
-LayerNorm into basic operations. Without display forwarding, use `--no-display --bbox X Y W H`
-with coordinates from the current rectified image; save one with
-`--check-camera --output outputs/camera_check`. This Python 3.8 path covers ROI tracking;
-optional SAM2 and other detector dependencies are outside this installation list.
+The Jetson system/container still needs the CUDA toolkit, a C++ compiler, NVIDIA EGL/GL
+libraries and camera USB access. Build engines and the renderer on the target rather
+than copying desktop `.engine` or `.so` files.
 
 TRT mode loads engines directly without PyTorch network weights. Pose engines share one
 execution-memory buffer sized to their largest requirement, with serialized submissions;
