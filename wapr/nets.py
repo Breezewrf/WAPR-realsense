@@ -9,6 +9,7 @@
 # WAPR、SAPR、WBPS。A 和 B 的形状是 (N, C, H, W)。
 import math
 import inspect
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -1721,7 +1722,7 @@ class _Engine:
         max_batch 是输入 A 的 profile 最大值。
 
 """
-    def __init__(self, path, out_names):
+    def __init__(self, path, out_names, execution_memory=None):
         """
         # Deserialize one engine file and keep its execution context.
 
@@ -1754,13 +1755,21 @@ class _Engine:
         # tensorrt 没有类型信息，所以按名字取出这些类。
         Logger = getattr(trt, "Logger")
         Runtime = getattr(trt, "Runtime")
-        logger = Logger(getattr(Logger, "ERROR"))
-        runtime = Runtime(logger)
+        self.logger = Logger(getattr(Logger, "ERROR"))
+        self.runtime = Runtime(self.logger)
         blob, self.metadata = unpack_engine(path.read_bytes())
-        self.engine = runtime.deserialize_cuda_engine(blob)
+        self.engine = self.runtime.deserialize_cuda_engine(blob)
         if self.engine is None:
             raise RuntimeError("engine")
-        self.context = self.engine.create_execution_context()
+        self.execution_memory = execution_memory
+        if execution_memory is None:
+            self.context = self.engine.create_execution_context()
+        else:
+            self.context = self.engine.create_execution_context_without_device_memory()
+            size = int(self.engine.device_memory_size)
+            execution_memory.reserve(size)
+            print("WAPR_TRT_CONTEXT", {"engine": path.stem, "execution_mib": round(size / 1024 ** 2, 2),
+                  "allocation": "shared"}, flush=True)
         if self.context is None:
             raise RuntimeError("Could not create TensorRT execution context")
         self.out_names = list(out_names)
@@ -1805,6 +1814,14 @@ class _Engine:
 
 """
         first = next(iter(feeds.values()))
+        stream = torch.cuda.current_stream(first.device)
+        if self.execution_memory is None:
+            return self._run(feeds, stream)
+        with self.execution_memory.use(self.context, first.device, stream):
+            return self._run(feeds, stream)
+
+    def _run(self, feeds, stream):
+        first = next(iter(feeds.values()))
         bindings = None if self._use_v3 else [0] * self.engine.num_bindings
         for name, tensor in feeds.items():
             if self._use_v3:
@@ -1829,7 +1846,6 @@ class _Engine:
             else:
                 bindings[index] = int(buf.data_ptr())
             outputs[name] = buf
-        stream = torch.cuda.current_stream(first.device)
         if self._use_v3:
             executed = self.context.execute_async_v3(stream.cuda_stream)
         else:
@@ -2001,7 +2017,8 @@ class NetRunner:
                         path = Path(recipe.engine_file("wbps")).with_name("wbps_batch.engine")
                         if not path.is_file():
                             raise FileNotFoundError("Build the batched WBPS engine on this GPU: python -m wapr.export_batch_engine")
-                        self.batch_engine = _Engine(path, ("within_group", "between_group"))
+                        self.batch_engine = _Engine(path, ("within_group", "between_group"),
+                                                    execution_memory=self.engine.execution_memory)
                     if count > self.batch_engine.max_batch:
                         raise ValueError("WBPS batch exceeds the engine row capacity")
                     layout = torch.empty((count // group, group, 1), device=A.device, dtype=torch.float32)
@@ -2016,9 +2033,9 @@ class NetRunner:
         return self.module(A, B)
 
 
-def load_net(name, ckpt, engine=None, device="cpu"):
+def load_net(name, ckpt, engine=None, device="cpu", execution_memory=None):
     """
-    # Build one network, load its checkpoint, and return a NetRunner.
+    # Load an engine directly, or build a network and load its checkpoint.
 
         name must be a key of recipe.channels.
 
@@ -2085,25 +2102,57 @@ def load_net(name, ckpt, engine=None, device="cpu"):
 """
     if name not in recipe.channels:
         raise KeyError(name)
+
+    # TensorRT-only path
+    if engine is not None:
+        engine_path = Path(engine)
+
+        if not engine_path.is_file():
+            raise FileNotFoundError(
+                "%s FP16 engine is missing: %s. "
+                "Build it with python -m wapr.export_engines "
+                "on this GPU." % (name, engine_path)
+            )
+
+        out_names = (
+            ("within_group", "between_group")
+            if name == "wbps"
+            else ("trans", "rot")
+        )
+
+        print(
+            "[TRT-ONLY] Loading engine:",
+            name,
+            str(engine_path),
+            flush=True,
+        )
+
+        with torch.cuda.device(device) if torch.device(device).type == "cuda" else nullcontext():
+            runner_engine = _Engine(engine_path, out_names, execution_memory=execution_memory)
+
+        # No PyTorch model or checkpoint is loaded
+        return NetRunner(
+            name=name,
+            module=None,
+            engine=runner_engine,
+        )
+
+    # Original PyTorch path: unchanged
     in_ch = int(recipe.channels[name])
+
     if name == "wbps":
         module = WbpsNet(in_ch)
         kind = "wbps"
-        out_names = ("within_group", "between_group")
     else:
         module = RefineNet(in_ch)
         kind = "refine"
-        out_names = ("trans", "rot")
+
     _load_weights(module, ckpt, kind)
     module.to(device)
     module.eval()
-    runner_engine = None
-    if engine is not None:
-        engine_path = Path(engine)
-        if not engine_path.is_file():
-            raise FileNotFoundError(
-                "%s FP16 engine is missing: %s. Build it with python -m wapr.export_engines on this GPU."
-                % (name, engine_path)
-            )
-        runner_engine = _Engine(engine_path, out_names)
-    return NetRunner(name, module, runner_engine)
+
+    return NetRunner(
+        name=name,
+        module=module,
+        engine=None,
+    )

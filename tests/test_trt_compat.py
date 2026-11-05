@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from wapr.nets import _Engine
+from wapr.nets import _Engine, load_net
+from wapr.trt_memory import SharedExecutionMemory
 from wapr.trt_compat import network_flags, workspace_bytes
 
 
@@ -38,7 +39,7 @@ class BuilderSettingsTests(unittest.TestCase):
 
 
 class EngineAPITests(unittest.TestCase):
-    def load_engine(self, major):
+    def load_engine(self, major, execution_memory=None):
         # Reorder binding indices to catch accidental dependence on feed/output order.
         self.indices = {"A": 2, "B": 0, "trans": 3, "rot": 1}
         shapes = ((1, 6, 2, 2), (2, 6, 2, 2), (12, 6, 2, 2))
@@ -58,6 +59,9 @@ class EngineAPITests(unittest.TestCase):
             self.context.execute_async_v3.return_value = True
             self.engine = SimpleNamespace(create_execution_context=lambda: self.context,
                                           get_tensor_profile_shape=Mock(return_value=shapes))
+        self.engine.create_execution_context = Mock(return_value=self.context)
+        self.engine.create_execution_context_without_device_memory = Mock(return_value=self.context)
+        self.engine.device_memory_size = 4096
         logger = Mock()
         logger.ERROR = 0
         module = SimpleNamespace(__version__="%d.5.2" % major, Logger=logger,
@@ -65,7 +69,7 @@ class EngineAPITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.dict("sys.modules", tensorrt=module):
             path = Path(folder) / "test.engine"
             path.write_bytes(b"native-test-plan")
-            return _Engine(path, ["trans", "rot"])
+            return _Engine(path, ["trans", "rot"], execution_memory=execution_memory)
 
     def run_engine(self, runner):
         self.feeds = {name: torch.ones(2, 6, 2, 2) for name in ("A", "B")}
@@ -107,6 +111,109 @@ class EngineAPITests(unittest.TestCase):
                 execute.return_value = False
                 with self.assertRaisesRegex(RuntimeError, "execution failed"):
                     self.run_engine(runner)
+
+    def test_shared_context_uses_external_memory_and_preserves_both_execution_apis(self):
+        from contextlib import contextmanager
+        for major in (8, 10):
+            with self.subTest(major=major):
+                memory = Mock()
+                @contextmanager
+                def use(context, device, stream):
+                    context.external_memory_active = True
+                    yield
+                    context.external_memory_active = False
+                memory.use.side_effect = use
+                runner = self.load_engine(major, memory)
+                self.engine.create_execution_context.assert_not_called()
+                self.engine.create_execution_context_without_device_memory.assert_called_once()
+                memory.reserve.assert_called_once_with(4096)
+                execute = self.context.execute_async_v2 if major == 8 else self.context.execute_async_v3
+                def enqueue(*args, **kwargs):
+                    self.assertTrue(self.context.external_memory_active)
+                    return True
+                execute.side_effect = enqueue
+                self.run_engine(runner)
+                self.assertFalse(self.context.external_memory_active)
+
+
+class LoadingTests(unittest.TestCase):
+    def test_trt_only_does_not_construct_or_load_a_torch_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "wapr_wo_mask.engine"
+            path.touch()
+            memory = object()
+            with patch("wapr.nets.RefineNet") as refine, patch("wapr.nets.WbpsNet") as wbps, \
+                 patch("wapr.nets._load_weights") as weights, patch("wapr.nets._Engine") as engine:
+                runner = load_net("wapr_wo_mask", "absent.pth", engine=path, execution_memory=memory)
+                self.assertIsNone(runner.module)
+                self.assertIs(runner.engine, engine.return_value)
+                engine.assert_called_once_with(path, ("trans", "rot"), execution_memory=memory)
+                refine.assert_not_called()
+                wbps.assert_not_called()
+                weights.assert_not_called()
+
+    def test_torch_and_export_paths_still_load_checkpoints(self):
+        for name, constructor in (("wapr_wo_mask", "RefineNet"), ("wbps", "WbpsNet")):
+            with self.subTest(name=name), patch("wapr.nets." + constructor) as module, \
+                 patch("wapr.nets._load_weights") as weights, patch("wapr.nets._Engine") as engine:
+                runner = load_net(name, "test.pth", device="cpu")
+                self.assertIs(runner.module, module.return_value)
+                self.assertIsNone(runner.engine)
+                weights.assert_called_once()
+                module.return_value.to.assert_called_once_with("cpu")
+                module.return_value.eval.assert_called_once()
+                engine.assert_not_called()
+
+
+class SharedMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.memory = SharedExecutionMemory("cuda:0")
+        self.stream = SimpleNamespace(cuda_stream=11)
+        self.context = SimpleNamespace()
+        self.buffer = Mock()
+        self.buffer.data_ptr.return_value = 257  # deliberately unaligned
+        self.device_patch = patch("torch.cuda.device")
+        self.empty_patch = patch("torch.empty", return_value=self.buffer)
+        self.event_patch = patch("torch.cuda.Event")
+        self.device_patch.start()
+        self.empty = self.empty_patch.start()
+        self.event = self.event_patch.start().return_value
+        self.addCleanup(self.device_patch.stop)
+        self.addCleanup(self.empty_patch.stop)
+        self.addCleanup(self.event_patch.stop)
+
+    def test_largest_requirement_is_allocated_once_and_reused_across_contexts(self):
+        for size in (1024, 4096, 2048, 512):
+            self.memory.reserve(size)
+        for context in (self.context, SimpleNamespace(), SimpleNamespace()):
+            with self.memory.use(context, "cuda:0", self.stream):
+                self.assertEqual(context.device_memory, 512)
+        self.empty.assert_called_once_with(4096 + 255, dtype=torch.uint8, device=torch.device("cuda:0"))
+        self.assertEqual(self.memory.allocated_bytes, 4096)
+        self.event.synchronize.assert_not_called()
+        self.assertEqual(self.event.record.call_count, 3)
+
+    def test_stream_switch_and_growth_wait_for_pending_gpu_work(self):
+        self.memory.reserve(1024)
+        with self.memory.use(self.context, "cuda:0", self.stream):
+            pass
+        with self.memory.use(SimpleNamespace(), "cuda:0", SimpleNamespace(cuda_stream=22)):
+            pass
+        self.event.synchronize.assert_called_once()
+        self.memory.reserve(8192)
+        with self.memory.use(self.context, "cuda:0", SimpleNamespace(cuda_stream=22)):
+            self.assertEqual(self.memory.allocated_bytes, 8192)
+        self.assertEqual(self.event.synchronize.call_count, 2)
+        self.assertEqual(self.empty.call_count, 2)
+
+    def test_exception_records_completion_and_different_device_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "enqueue failed"):
+            with self.memory.use(self.context, "cuda:0", self.stream):
+                raise RuntimeError("enqueue failed")
+        self.event.record.assert_called_once_with(self.stream)
+        with self.assertRaisesRegex(ValueError, "same CUDA device"):
+            with self.memory.use(self.context, "cuda:1", self.stream):
+                self.fail("mismatched device was accepted")
 
 
 if __name__ == "__main__":

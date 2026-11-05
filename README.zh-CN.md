@@ -61,12 +61,22 @@ python -m wapr_realsense --config configs/box.yaml --init roi --backend trt
 桌面 `pyproject.toml` 和 `uv.lock` 仍用于 Python 3.10+ 的桌面环境。
 Docker 需要 NVIDIA runtime、相机 USB 设备访问和 NVIDIA EGL/GL 库；使用 ROI 窗口还需要显示转发。
 渲染器和引擎在 Orin 本机重新构建，不复制桌面的 `.so` 或 `.engine`。
-ARM64 导出 workspace 上限默认 1 GiB，可用 `WAPR_TRT_WORKSPACE_GB=2` 调整；
-该上限不包含模型、激活和整个进程的内存。操作者已验证 D435I 取帧、原生渲染器编译及
-EGL/OpenGL 初始化；完整位姿推理和 TensorRT 引擎构建仍待实机验证。TRT 8.5 导出使用
+ARM64 导出 workspace 上限默认 1 GiB；操作者在 1 GiB 失败后，使用
+`WAPR_TRT_WORKSPACE_GB=4` 成功构建 `wapr_w_mask`。此值限制算法选择所需的临时空间，
+不限制整个进程的内存；选中的算法在推理时仍需要临时空间。
+操作者已验证 D435I 取帧、原生渲染及 torch ROI 跟踪（约 503–518 ms/帧）；
+TensorRT 位姿推理仍待实机验证。TRT 8.5 导出使用
 opset 16，将 LayerNorm 展开为基础算子。没有显示转发时使用 `--no-display --bbox X Y W H`，
 框坐标应来自当前校正后的图像；可先用 `--check-camera --output outputs/camera_check` 保存图像。
 此 Python 3.8 路径用于 ROI 跟踪；可选 SAM2 等模块的依赖不包含在该安装清单中。
+
+TRT 模式直接加载引擎，不额外加载 PyTorch 网络权重。位姿引擎串行提交推理，
+共用一块按最大需求分配的执行内存；权重和 context 的持久状态仍各自保留，无须重建已有引擎。
+先运行 `python scripts/check_trt_memory.py --run`，保留四个引擎并测试 12/6 候选的合成输入
+（不验证位姿精度），再用 `--backend trt` 启动应用。
+`WAPR_TRT_CONTEXT` 显示各引擎需求，`WAPR_TRT_MEMORY` 显示实际分配的共享缓冲大小。
+这条内存优化路径尚待 Jetson 验证；`WAPR_TRT_SHARED_MEMORY=0` 恢复各 context 单独分配，
+用于对比时可能再次耗尽 Orin NX 16GB 的内存。
 
 在冻结画面上紧贴目标拖出矩形框，Enter/空格确认。实时窗口中：
 `r` 重新初始化、`s` 保存 RGB-D 与结果、`q`/Esc 退出。
@@ -165,6 +175,50 @@ GroundingDINO 包含图像预处理、推理及框过滤；SAM2 包含分割及 
 WAPR tracking 包含完整跟踪更新和有效性检查；WAPR 位姿初始化会处理所有有效候选，最后才选择目标。
 计时前后同步 CUDA，测量包含 CPU 工作和 GPU 等待的阶段墙钟耗时；额外同步会影响阶段重叠。
 终端自动启用颜色，重定向日志或设置 `NO_COLOR=1` 时输出纯文本。
+
+## 网页 Demo
+
+```bash
+python -m wapr_realsense --config configs/box.auto.yaml --web
+# 默认手动框选，不加载自动检测模型：
+python -m wapr_realsense --config configs/box.yaml --web
+# Jetson 局域网访问：
+python -m wapr_realsense --config configs/box.auto.yaml --web --web-host 0.0.0.0
+```
+
+本机打开 `http://127.0.0.1:8000`，局域网打开 `http://<jetson-ip>:8000`。
+页面左侧显示彩色画面、3D 框与坐标轴；右侧包含状态、手动初始化开关、Detect 和日志式耗时摘要。
+静态资源随 Python 包提供，不需要 Node、外部 CDN 或桌面显示环境。
+
+- **WARMUP**：加载模型并预热，画面留空、按钮禁用；预热输出全部丢弃。
+- **INITIALIZED**：准备完成，显示相机画面，等待点击 **Detect**。
+- **Looking for object**：首次检测或目标丢失后的自动重搜；搜索期间 Detect 禁用。
+- **TRACKING**：已找到目标，显示位姿叠加；可再次点击 Detect 发起新搜索。
+
+开关初始值遵循配置的初始化模式，也可在网页切换。开启手动初始化后，画面冻结供拖动框选，
+画好框再点击 Detect；“重新框选”会取得新的冻结帧。框选坐标映射回原图像素，并绑定这份
+RGB-D，不会用到后续帧。跟踪成功后恢复实时画面。
+**手动模式丢失目标后提示“目标丢失，请重新手动框选”，清除旧框并等待用户重新框选，
+不会自动重搜或复用旧框。** 关闭开关时保留自动搜索与丢失后自动恢复。
+预热和搜索期间开关禁用；从手动切到自动且尚未加载检测模型时，重新显示 WARMUP，
+加载和预热结束后等待 Detect。模式切换会清除旧跟踪。
+
+右侧复用终端 `[WARMUP]`、最近一次 `[INIT]` / `[REINIT]` 和 `[TRACKING]`
+汇总内容；tracking 仍按 `--timing-interval` 输出区间平均耗时与帧数。
+预热完成后默认折叠 WARMUP，仍可展开查看。无候选时未运行的 SAM2 / DINOv2 显示
+`skipped`；位姿和 tracking 使用单实例代表负载预热，真实候选批量变化仍可能产生额外首次开销。
+自动搜索期间画面保持在搜索输入帧，HTTP 状态接口仍可响应。
+断开网页连接会禁用按钮并隐藏旧画面；重新连接后恢复当前会话。
+
+无需相机或 CUDA 即可检查页面交互，画面及耗时明确标为模拟数据：
+
+```bash
+python -m wapr_realsense --web-demo
+```
+
+模拟模式约 2 秒完成预热，默认支持手动框选，也可关闭开关体验自动模式；点击 Detect 后约 2 秒
+找到目标，tracking 约 12 秒后模拟丢失，按当前模式等待重新框选或自动重搜。
+真实模式仍使用原来的位姿文件输出约定，逐帧附带 `initialization_mode`；本次没有验证 Jetson 实机推理。
 
 ## 输出与机器人接入
 

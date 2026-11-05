@@ -63,14 +63,24 @@ TensorRT uses the existing system installation. The desktop `pyproject.toml` and
 still target Python 3.10+. Docker needs the NVIDIA runtime, camera USB access and NVIDIA
 EGL/GL libraries; interactive ROI selection also needs display forwarding. Rebuild the native
 renderer and engines on Orin instead of copying desktop `.so` or `.engine` files. ARM64
-engine builds default to a 1 GiB workspace limit; override it with `WAPR_TRT_WORKSPACE_GB=2`.
-This limit excludes model, activation and total process memory. The operator has verified D435I
-capture, native renderer compilation and EGL/OpenGL initialization. Complete pose inference and
-TensorRT engine builds still need on-device validation. TRT 8.5 exports use opset 16 to decompose
+engine builds default to a 1 GiB workspace limit; the operator built `wapr_w_mask` with
+`WAPR_TRT_WORKSPACE_GB=4` after 1 GiB failed. This is a scratch-space budget for algorithm
+selection, not a total process memory cap; selected algorithms also need scratch space at runtime.
+The operator has verified D435I capture, native rendering and torch ROI tracking (~503–518 ms/frame).
+TensorRT pose inference still needs on-device validation. TRT 8.5 exports use opset 16 to decompose
 LayerNorm into basic operations. Without display forwarding, use `--no-display --bbox X Y W H`
 with coordinates from the current rectified image; save one with
 `--check-camera --output outputs/camera_check`. This Python 3.8 path covers ROI tracking;
 optional SAM2 and other detector dependencies are outside this installation list.
+
+TRT mode loads engines directly without PyTorch network weights. Pose engines share one
+execution-memory buffer sized to their largest requirement, with serialized submissions;
+weights and persistent context state remain separate. Existing engines need no rebuild.
+Check all four engines together with `python scripts/check_trt_memory.py --run` (synthetic
+12/6-candidate inputs, not an accuracy test), then run the application with `--backend trt`.
+`WAPR_TRT_CONTEXT` reports each requirement; `WAPR_TRT_MEMORY` reports the allocated shared buffer.
+This memory path needs Jetson validation. `WAPR_TRT_SHARED_MEMORY=0` restores separate context
+allocations for comparison and may exhaust memory on Orin NX 16GB.
 
 Drag a tight box in the frozen image and press Enter/Space. In the live window:
 `r` reinitializes, `s` saves RGB-D and pose, and `q`/Esc exits.
@@ -178,6 +188,59 @@ includes the complete update and validity check; pose initialization evaluates a
 before selecting a target. Values are wall-clock milliseconds including CPU work and GPU waits,
 with CUDA synchronized before and after each stage. These extra synchronizations can affect stage
 overlap. Colors are enabled automatically in a terminal; redirected output or `NO_COLOR=1` uses plain text.
+
+## Browser demo
+
+```bash
+python -m wapr_realsense --config configs/box.auto.yaml --web
+# Start in manual mode, without loading automatic detection models:
+python -m wapr_realsense --config configs/box.yaml --web
+# LAN access on Jetson:
+python -m wapr_realsense --config configs/box.auto.yaml --web --web-host 0.0.0.0
+```
+
+Open `http://127.0.0.1:8000` locally, or `http://<jetson-ip>:8000` over the LAN.
+The camera view shows the 3D box and axes. A small dashboard on the right contains
+the status, manual initialization switch, Detect button and timing summaries. All static resources ship with
+the Python package; Node, external CDNs and a desktop display are unnecessary.
+
+- **WARMUP**: load and warm up models; blank preview and disabled controls. All warmup results are discarded.
+- **INITIALIZED**: camera preview is available; wait for the user to click **Detect**.
+- **Looking for object**: initial detection or automatic recovery after tracking loss. Detect is disabled while searching.
+- **TRACKING**: show the pose overlay. Clicking Detect again starts a new search.
+
+The switch initially follows the configured initialization mode. Enable manual
+initialization to freeze a frame, drag a bounding box, then click Detect. The
+redraw button obtains a new frozen frame. Pixel coordinates are mapped to the
+original image and tied to that exact RGB-D frame. Successful tracking restores
+the live view. **Loss in manual mode clears the old box and prompts the user to
+draw a new one; it never searches automatically or reuses the old box.** Automatic
+mode retains search and recovery. Warmup and search disable the switch. Switching
+from manual to automatic loads and warms detection models on demand under WARMUP,
+then waits for Detect. Changing modes resets the previous track.
+
+The dashboard receives the same `[WARMUP]`, latest `[INIT]` / `[REINIT]`, and
+`[TRACKING]` summaries as the terminal. Tracking means and frame counts use
+`--timing-interval`. Warmup details collapse when ready and remain available.
+SAM2 / DINOv2 show `skipped` when no proposals exercise those stages. Pose and
+tracking warmup use representative single-instance workloads; different real
+candidate batch sizes may still incur additional first-use overhead.
+During synchronous searches, the preview holds the search input frame while
+HTTP status requests remain responsive. Browser disconnection hides the old
+preview and disables controls; reconnection restores the current session.
+
+To inspect the UI without a camera or CUDA, use the explicitly labelled simulation:
+
+```bash
+python -m wapr_realsense --web-demo
+```
+
+The simulation warms up for about 2 seconds and supports both modes; it defaults
+to manual drawing. It finds an object about 2 seconds after Detect and simulates
+loss after about 12 seconds of tracking, then waits for a new box or recovers
+automatically according to the selected mode. Real operation preserves the pose
+file output contracts and adds `initialization_mode` to each frame record.
+Jetson inference has not been validated here.
 
 ## Pose output
 
