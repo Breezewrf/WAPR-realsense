@@ -6,11 +6,68 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from wapr.timing import ComponentTimer, TimingCollector, TrackingTiming, print_timing, timing_phase
+from wapr.timing import ComponentTimer, TimingCollector, TrackingTiming, print_timing, timing_phase, pose_component_timer
 from wapr_realsense.app import timed_step
 
 
 class ComponentTimingTests(unittest.TestCase):
+    def test_pose_profiling_is_off_without_an_explicit_pose_collector(self):
+        with patch("torch.cuda.synchronize") as synchronize:
+            with pose_component_timer("WAPR", "cuda:0"):
+                pass
+            with TimingCollector() as detector:
+                with pose_component_timer("WAPR", "cuda:0"):
+                    pass
+        self.assertEqual(detector.samples, {})
+        synchronize.assert_not_called()
+
+    def test_tracking_components_are_averaged_per_frame_and_reset_on_flush(self):
+        components = TimingCollector(profile_pose=True)
+        for name, value in (("WAPR", 60), ("WAPR crop", 15), ("WAPR network", 40),
+                            ("SAPR", 30), ("SAPR crop", 10), ("SAPR network", 15),
+                            ("WBPS", 20), ("WBPS crop", 5), ("WBPS network", 12)):
+            components.record(name, value)
+        tracking = TrackingTiming(interval=5, profile=True)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            tracking.add(120, now=0, components=components)
+            tracking.add(140, now=5, components=components)
+            tracking.add(90, now=6)
+            tracking.flush()
+            tracking.flush()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0], "[TRACKING] WAPR avg=130.00 ms | frames=2")
+        self.assertIn("WAPR=60.00 ms (crop=15.00, network=40.00)", lines[1])
+        self.assertIn("SAPR=30.00 ms (crop=10.00, network=15.00)", lines[1])
+        self.assertIn("WBPS=20.00 ms (crop=5.00, network=12.00)", lines[1])
+        self.assertIn("other=20.00 ms", lines[1])
+        self.assertEqual(lines[2], "[TRACKING] WAPR avg=90.00 ms | frames=1")
+        self.assertEqual(tracking.components.samples, {})
+
+    def test_timed_step_collects_only_tracking_and_includes_the_lost_update(self):
+        session = SimpleNamespace(pose=None, estimator=SimpleNamespace(device=None))
+        def step(frame, bbox=None):
+            with pose_component_timer("WAPR", None):
+                pass
+            if bbox is not None:
+                session.pose = object()
+                return "initialized_roi", {}
+            session.pose = None
+            return "lost", None
+        session.step = step
+        tracking = TrackingTiming(profile=True)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            timed_step(session, object(), bbox=[1, 1, 2, 2], tracking_timing=tracking)
+            timed_step(session, object(), tracking_timing=tracking)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("[INIT]"))
+        self.assertIn("frames=1", lines[1])
+        self.assertIn("stages avg/frame:", lines[2])
+        self.assertEqual(tracking.count, 0)
+
     def test_cuda_work_is_synchronized_before_reading_each_timestamp(self):
         events = []
 

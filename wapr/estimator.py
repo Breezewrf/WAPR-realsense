@@ -19,6 +19,7 @@ import torch
 from wapr import recipe
 from wapr.engine_profile import pose_profile, validate_pose_profile
 from wapr.nets import load_net
+from wapr.timing import pose_component_timer
 from wapr.pose_groups import wbps_group_sizes
 from wapr.ogl import depth2xyzmap_batch, make_crop_pair, runtime_for
 
@@ -1319,15 +1320,18 @@ class WAPREstimator:
 
 """
         poses_c = poses_original_to_centered(poses, center)
+        stage = "SAPR" if net.name == "sapr" else "WAPR"
         for _ in range(int(iters)):
-            A, B, poseA, dia = make_crop_pair(
-                rgb, depth, mask, poses_c, K, mesh, diameter,
-                crop_ratio=crop_ratio, use_mask=use_mask, device=self.device,
-                meshes=meshes,
-                observed_xyz=observed_xyz, mesh_ids=mesh_ids,
-            )
-            with torch.no_grad():
-                pred = net(A, B, L=group_size)
+            with pose_component_timer(stage + " crop", self.device):
+                A, B, poseA, dia = make_crop_pair(
+                    rgb, depth, mask, poses_c, K, mesh, diameter,
+                    crop_ratio=crop_ratio, use_mask=use_mask, device=self.device,
+                    meshes=meshes,
+                    observed_xyz=observed_xyz, mesh_ids=mesh_ids,
+                )
+            with pose_component_timer(stage + " network", self.device):
+                with torch.no_grad():
+                    pred = net(A, B, L=group_size)
             # rot is tanh-limited radians. trans is scaled by half the diameter, meters.
             # rot 是 tanh 限幅后的弧度。trans 乘直径的一半，单位米。
             rot_vec = torch.tanh(pred["rot"]) * float(max_rot)

@@ -1,6 +1,7 @@
 """RealSense RGB-D to a single object's 6D pose: initialize, then track."""
 
 import argparse
+from contextlib import nullcontext
 from datetime import datetime
 import json
 import os
@@ -12,7 +13,7 @@ import cv2
 import numpy as np
 import yaml
 
-from wapr.timing import ComponentTimer, TrackingTiming, print_timing
+from wapr.timing import ComponentTimer, TimingCollector, TrackingTiming, print_timing
 
 from .camera import RGBDFrame, RealSenseCamera
 from .geometry import check_bbox, draw_pose, load_mesh
@@ -88,6 +89,8 @@ def parse_args(argv=None):
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--log-poses", action="store_true", help="Also print verbose POSE_JSON records; files always contain every frame")
     parser.add_argument("--timing-interval", type=float, default=5.0, help="Seconds between tracking mean-time summaries")
+    parser.add_argument("--profile-tracking", action="store_true",
+                        help="Collect synchronized WAPR/SAPR/WBPS crop/network timings; adds profiling overhead")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--camera-frame", default="color_optical_frame")
     parser.add_argument("--object-frame", default="target_object")
@@ -167,10 +170,13 @@ def timed_step(session, frame, bbox=None, tracking_timing=None, initialization_p
     tracking = session.pose is not None and bbox is None
     if not tracking and tracking_timing is not None:
         tracking_timing.flush()
-    with ComponentTimer(None, session.estimator.device) as timer:
+    profile = tracking and tracking_timing is not None and tracking_timing.profile
+    components = TimingCollector(profile_pose=True) if profile else None
+    collection = components if components is not None else nullcontext()
+    with collection, ComponentTimer(None, session.estimator.device) as timer:
         status, row = session.step(frame, bbox=bbox)
     if tracking and tracking_timing is not None:
-        tracking_timing.add(timer.elapsed_ms)
+        tracking_timing.add(timer.elapsed_ms, components=components)
         if status == "lost":
             tracking_timing.flush()
     elif bbox is not None:
@@ -258,6 +264,7 @@ def main(argv=None):
     (output / "session.json").write_text(json.dumps({"mesh": str(args.mesh.resolve()), "mesh_unit": args.mesh_unit,
         "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend,
         "object_mode": args.object_mode, "init": args.init,
+        "profile_tracking": args.profile_tracking,
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
         "automatic_detection": None if args.init == "roi" else {
             "interval_s": args.detect_interval, "score_2d_min": args.detect_score,
@@ -267,7 +274,7 @@ def main(argv=None):
         "pose_convention": "original_scaled_mesh_to_color_optical_frame"}, indent=2))
     print("LIVE_OUTPUT", output, flush=True)
     last_frame = None
-    tracking_timing = TrackingTiming(args.timing_interval)
+    tracking_timing = TrackingTiming(args.timing_interval, profile=args.profile_tracking)
     try:
         initializer = build_initializer(args, estimator, mesh, prepared, diameter)
         session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,

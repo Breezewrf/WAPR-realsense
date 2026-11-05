@@ -72,6 +72,8 @@ groundingdino_sam2_dinov2_detect:
         args = parse_args([])
         self.assertEqual(args.timing_interval, 5.0)
         self.assertFalse(args.log_poses)
+        self.assertFalse(args.profile_tracking)
+        self.assertTrue(parse_args(["--profile-tracking"]).profile_tracking)
         args = parse_args(["--timing-interval", "2", "--log-poses"])
         self.assertEqual(args.timing_interval, 2.0)
         self.assertTrue(args.log_poses)

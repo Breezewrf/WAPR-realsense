@@ -144,7 +144,7 @@ class Dashboard:
                 self.search_part = part
                 if message.endswith(" | started"):
                     self.timings[group].clear()
-            if group == "TRACKING":
+            if group == "TRACKING" and not message.startswith("stages avg/frame:"):
                 self.timings[group].clear()
             self.timings[group].append(message)
 
@@ -259,13 +259,14 @@ def track_camera(args, state):
     initializer = build_initializer(args, estimator, mesh, prepared, diameter)
     output = args.output or Path.cwd() / "outputs" / "wapr_realsense" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     writer = PoseWriter(output)
-    tracking = TrackingTiming(args.timing_interval)
+    tracking = TrackingTiming(args.timing_interval, profile=args.profile_tracking)
     last_frame = None
     try:
         (output / "session.json").write_text(json.dumps({
             "mesh": str(args.mesh.resolve()), "mesh_unit": args.mesh_unit,
             "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend,
             "object_mode": args.object_mode,
+            "profile_tracking": args.profile_tracking,
             "init": args.init, "web": True, "minimum_score": args.min_score,
             "camera_frame": args.camera_frame, "object_frame": args.object_frame,
             "pose_convention": "original_scaled_mesh_to_color_optical_frame",

@@ -204,6 +204,19 @@ WAPR tracking 包含完整跟踪更新和有效性检查；WAPR 位姿初始化�
 计时前后同步 CUDA，测量包含 CPU 工作和 GPU 等待的阶段墙钟耗时；额外同步会影响阶段重叠。
 终端自动启用颜色，重定向日志或设置 `NO_COLOR=1` 时输出纯文本。
 
+加上 `--profile-tracking`，复用现有计时器查看跟踪分段耗时：
+
+```bash
+python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
+  --web-host 0.0.0.0 --web-port 8000 --profile-tracking --timing-interval 5
+```
+
+每个统计窗口增加 WAPR、SAPR、WBPS 的每帧平均耗时，以及各自的 `crop`（渲染和裁剪预处理）
+和 `network`（包含缓冲设置的网络前向调用）。多次迭代的耗时按帧累加；`other` 为总耗时减去
+三个阶段总耗时。crop/network 已包含在对应阶段内，不应重复相加。网页复用同一份汇总。
+分段计时默认关闭，额外 CUDA 同步会改变延迟；评估正常跟踪性能时去掉此开关。
+初始化和预热不混入跟踪分段统计。
+
 ## 网页 Demo
 
 ```bash

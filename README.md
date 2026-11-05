@@ -219,6 +219,20 @@ before selecting a target. Values are wall-clock milliseconds including CPU work
 with CUDA synchronized before and after each stage. These extra synchronizations can affect stage
 overlap. Colors are enabled automatically in a terminal; redirected output or `NO_COLOR=1` uses plain text.
 
+Add `--profile-tracking` to reuse the existing timers for a tracking breakdown:
+
+```bash
+python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
+  --web-host 0.0.0.0 --web-port 8000 --profile-tracking --timing-interval 5
+```
+
+Each tracking window also reports WAPR, SAPR and WBPS milliseconds per frame, with nested
+`crop` (rendering/crop preprocessing) and `network` (forward call including buffer setup) times.
+Repeated iterations are summed per frame. `other` is the total minus the three stage totals;
+crop/network values are already included in their parent stages. The same summaries appear
+in the browser. Profiling defaults off because extra CUDA synchronization changes latency;
+compare normal tracking performance with the flag removed. Initialization and warmup are excluded.
+
 ## Browser demo
 
 ```bash

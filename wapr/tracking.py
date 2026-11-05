@@ -23,6 +23,7 @@ from wapr.export_tracking_engine import tracking_hypotheses
 from wapr.nets import _Engine
 from wapr.ogl import depth2xyzmap_batch, make_crop_pair
 from wapr.pose_groups import wbps_group_sizes
+from wapr.timing import pose_component_timer
 
 
 def refine_batch(estimator, net_name, poses, rgb, depth_m, K, mesh, center, diameter_m, iters, max_rot):
@@ -206,44 +207,49 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
         # 两个 WAPR 前缀和三个 SAPR 前缀跨全部实例批量计算；下面的循环只组织网格
         # 行与输出记录，不逐物体调用神经网络。
         wapr_in = torch.stack((center_t, previous_t), dim=1).reshape(count * 2, 4, 4)
-        wapr_out = estimator._refine(
-            estimator.nets["wapr_wo_mask"], wapr_in, rgb_device, depth_device, mask_device,
-            K, batch_meshes[0], np.repeat(batch_centers, 2, axis=0), np.repeat(batch_diameters, 2),
-            iters=recipe.wapr_iters, max_rot=recipe.wapr_max_rot_rad,
-            crop_ratio=recipe.refine_crop_ratio, use_mask=False,
-            meshes=[mesh for mesh in batch_meshes for _ in range(2)],
-            group_size=2,
-            observed_xyz=observed_xyz,
-            mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(2)],
-        ).reshape(count, 2, 4, 4)
+        with pose_component_timer('WAPR', estimator.device):
+            wapr_out = estimator._refine(
+                estimator.nets["wapr_wo_mask"], wapr_in, rgb_device, depth_device, mask_device,
+                K, batch_meshes[0], np.repeat(batch_centers, 2, axis=0), np.repeat(batch_diameters, 2),
+                iters=recipe.wapr_iters, max_rot=recipe.wapr_max_rot_rad,
+                crop_ratio=recipe.refine_crop_ratio, use_mask=False,
+                meshes=[mesh for mesh in batch_meshes for _ in range(2)],
+                group_size=2,
+                observed_xyz=observed_xyz,
+                mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(2)],
+            ).reshape(count, 2, 4, 4)
         sapr_in = torch.stack((center_t, wapr_out[:, 0], wapr_out[:, 1]), dim=1).reshape(count * 3, 4, 4)
-        sapr_out = estimator._refine(
-            estimator.nets["sapr"], sapr_in, rgb_device, depth_device, mask_device,
-            K, batch_meshes[0], np.repeat(batch_centers, 3, axis=0), np.repeat(batch_diameters, 3),
-            iters=recipe.sapr_iters, max_rot=recipe.sapr_max_rot_rad,
-            crop_ratio=recipe.refine_crop_ratio, use_mask=False,
-            meshes=[mesh for mesh in batch_meshes for _ in range(3)],
-            group_size=3,
-            observed_xyz=observed_xyz,
-            mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(3)],
-        ).reshape(count, 3, 4, 4)
+        with pose_component_timer('SAPR', estimator.device):
+            sapr_out = estimator._refine(
+                estimator.nets["sapr"], sapr_in, rgb_device, depth_device, mask_device,
+                K, batch_meshes[0], np.repeat(batch_centers, 3, axis=0), np.repeat(batch_diameters, 3),
+                iters=recipe.sapr_iters, max_rot=recipe.sapr_max_rot_rad,
+                crop_ratio=recipe.refine_crop_ratio, use_mask=False,
+                meshes=[mesh for mesh in batch_meshes for _ in range(3)],
+                group_size=3,
+                observed_xyz=observed_xyz,
+                mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(3)],
+            ).reshape(count, 3, 4, 4)
         candidates = torch.stack((previous_t, center_t, wapr_out[:, 0], sapr_out[:, 0],
                                   sapr_out[:, 1], sapr_out[:, 2]), dim=1)
-        score_centers = np.repeat(batch_centers, group, axis=0)
-        score_poses = poses_original_to_centered(candidates.reshape(count * group, 4, 4), score_centers)
-        A, B, _poses, _diameters = make_crop_pair(
-            rgb_device, depth_device, mask_device, score_poses, K, batch_meshes[0],
-            np.repeat(batch_diameters, group), crop_ratio=recipe.wbps_crop_ratio,
-            use_mask=False, device=estimator.device,
-            meshes=[mesh for mesh in batch_meshes for _ in range(group)],
-            observed_xyz=observed_xyz,
-            mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(group)],
-        )
-        with torch.no_grad():
-            if score_engine is None:
-                scores = estimator.nets["wbps"](A, B, L=group)
-            else:
-                scores = score_engine.run({"A": A, "B": B})
+        with pose_component_timer('WBPS', estimator.device):
+            score_centers = np.repeat(batch_centers, group, axis=0)
+            score_poses = poses_original_to_centered(candidates.reshape(count * group, 4, 4), score_centers)
+            with pose_component_timer('WBPS crop', estimator.device):
+                A, B, _poses, _diameters = make_crop_pair(
+                    rgb_device, depth_device, mask_device, score_poses, K, batch_meshes[0],
+                    np.repeat(batch_diameters, group), crop_ratio=recipe.wbps_crop_ratio,
+                    use_mask=False, device=estimator.device,
+                    meshes=[mesh for mesh in batch_meshes for _ in range(group)],
+                    observed_xyz=observed_xyz,
+                    mesh_ids=[mid for mid in prepared_ids[start:stop] for _ in range(group)],
+                )
+            with pose_component_timer('WBPS network', estimator.device):
+                with torch.no_grad():
+                    if score_engine is None:
+                        scores = estimator.nets["wbps"](A, B, L=group)
+                    else:
+                        scores = score_engine.run({"A": A, "B": B})
         if any(tuple(scores[name].shape) != (count, group)
                for name in ("within_group", "between_group")):
             raise RuntimeError("Tracking scorer must preserve the independent object/group axes")

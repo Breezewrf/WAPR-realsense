@@ -28,6 +28,16 @@ from test_realsense_pose import frame, result
 
 
 class DashboardTests(unittest.TestCase):
+    def test_tracking_breakdown_keeps_the_same_windows_total(self):
+        state = Dashboard()
+        state.record_timing("TRACKING", "WAPR avg=250 ms | frames=20")
+        detail = "stages avg/frame: WAPR=100 ms | SAPR=80 ms | WBPS=60 ms"
+        state.record_timing("TRACKING", detail)
+        self.assertEqual(state.snapshot()["timings"]["TRACKING"],
+                         ["WAPR avg=250 ms | frames=20", detail])
+        state.record_timing("TRACKING", "WAPR avg=240 ms | frames=21")
+        self.assertEqual(state.snapshot()["timings"]["TRACKING"], ["WAPR avg=240 ms | frames=21"])
+
     def test_manual_bbox_uses_frozen_rgbd_and_rejects_invalid_or_replaced_selection(self):
         state = Dashboard(manual=True)
         state.set_status("INITIALIZED")
