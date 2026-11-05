@@ -12,7 +12,6 @@ Initialization, region association, and lost-track recovery belong to the caller
 初始化、区域关联与丢失恢复由调用方负责。
 """
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +87,34 @@ def between_group_of_pose(estimator, pose, rgb, depth_m, mask, K, mesh, center, 
     return between.reshape(-1).detach().float().cpu().numpy()
 
 
+def _tracking_score_engine(estimator, instance_count):
+    """Use ordinary WBPS for one object; separate grouped engines for several."""
+    group = len(tracking_hypotheses)
+    wapr_engine = estimator.nets["wapr_wo_mask"].engine
+    sapr_engine = estimator.nets["sapr"].engine
+    if wapr_engine is None:
+        return None, max(wbps_group_sizes) // group
+    base_capacity = min(int(wapr_engine.max_batch) // 2, int(sapr_engine.max_batch) // 3)
+    if instance_count == 1:
+        # wbps.engine accepts one complete dynamic group, including L=6.
+        # A separate object-axis engine is needed only for multiple objects.
+        return None, min(base_capacity, int(estimator.nets["wbps"].engine.max_batch) // group)
+    engine_dir = Path(recipe.engine_file("wbps")).parent
+    if (engine_dir / "wbps_batch.engine").is_file():
+        return None, min(base_capacity, int(estimator.nets["wbps"].engine.max_batch) // group)
+    score_engine = getattr(estimator, "tracking_score_engine", None)
+    if score_engine is None:
+        path = engine_dir / "wbps_tracking.engine"
+        if not path.is_file():
+            raise FileNotFoundError("Run python -m wapr.export_tracking_engine on the inference GPU: " + str(path))
+        score_engine = _Engine(path, ("within_group", "between_group"),
+                               execution_memory=getattr(wapr_engine, "execution_memory", None))
+        if score_engine.min_batch != group or score_engine.max_batch != max(wbps_group_sizes):
+            raise RuntimeError("Tracking engine profile differs; rebuild wbps_tracking.engine")
+        estimator.tracking_score_engine = score_engine
+    return score_engine, min(base_capacity, int(score_engine.max_batch) // group)
+
+
 def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
     """Batch the six-candidate pose update for one or several tracked instances.
 
@@ -102,13 +129,15 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
     深度；未提供时使用上一帧位姿。obj_id 是可选类别信息。
 
     WAPR/SAPR and WBPS run across instances; six hypotheses remain an independent
-    score group per instance. TensorRT uses wbps_batch.engine, or the explicitly
+    score group per instance. A single object uses wbps.engine directly. Multiple
+    objects use wbps_batch.engine, or the explicitly
     exported six-hypothesis tracking engine. Torch also scores groups together. Larger lists
     are chunked at the engine row limit. Empty input returns []. No GT or mask
     is read here, and no ID assignment, redetection, or automatic rescue occurs.
     within_group selects the pose; between_group is the complete group's maximum.
     WAPR/SAPR 与 WBPS 跨实例批量计算，每个实例的六个候选姿态仍独立评分。
-    TensorRT 使用 wbps_batch.engine，或显式导出的六候选跟踪引擎；torch 路径同样批量计算评分。超过引擎行数
+    TensorRT 单物体直接使用 wbps.engine，多物体使用 wbps_batch.engine 或显式导出的
+    六候选跟踪引擎；torch 路径同样批量计算评分。超过引擎行数
     上限时分块。空列表返回 []。此处不读取真值或 mask，不分配身份、不重新
     检测，也不自动恢复。输出顺序与输入一致，保留 track_id 和可选 obj_id。
     within_group 选择位姿；between_group 返回该实例完整候选组的最大值。
@@ -155,34 +184,7 @@ def track_many_categories_many_instances(estimator, rgb, depth_m, K, instances):
         centered.append(center_pose)
 
     group = len(tracking_hypotheses)
-    wapr_engine = estimator.nets["wapr_wo_mask"].engine
-    sapr_engine = estimator.nets["sapr"].engine
-    batch_engine_path = os.path.join(os.path.dirname(os.fspath(recipe.engine_file("wbps"))), "wbps_batch.engine")
-    if wapr_engine is not None and os.path.isfile(batch_engine_path):
-        score_engine = None
-        objects_per_batch = min(int(wapr_engine.max_batch) // 2,
-                                int(sapr_engine.max_batch) // 3,
-                                int(estimator.nets["wbps"].engine.max_batch) // group)
-    elif wapr_engine is not None:
-        # Load an independent resource only when the tracking entry is used.
-        # 只在使用跟踪入口时载入独立引擎资源。
-        score_engine = getattr(estimator, "tracking_score_engine", None)
-        if score_engine is None:
-            engine_path = os.path.join(os.path.dirname(os.fspath(recipe.engine_file("wbps"))),
-                                       "wbps_tracking.engine")
-            if not os.path.isfile(engine_path):
-                raise FileNotFoundError("Run python -m wapr.export_tracking_engine on the inference GPU: " + engine_path)
-            score_engine = _Engine(Path(engine_path), ("within_group", "between_group"))
-            if score_engine.min_batch != group or score_engine.max_batch != max(wbps_group_sizes):
-                raise RuntimeError("Tracking engine profile differs; rebuild wbps_tracking.engine")
-            estimator.tracking_score_engine = score_engine
-        objects_per_batch = min(int(wapr_engine.max_batch) // 2,
-                                int(sapr_engine.max_batch) // 3, int(score_engine.max_batch) // group)
-    else:
-        score_engine = None
-        # Bound crop storage by the same row budget as the released engines.
-        # 裁剪存储沿用发布引擎相同的行数预算。
-        objects_per_batch = max(wbps_group_sizes) // group
+    score_engine, objects_per_batch = _tracking_score_engine(estimator, len(instances))
     if objects_per_batch < 1:
         raise RuntimeError("Engine profile cannot hold one tracking instance")
     rgb_device = torch.as_tensor(rgb_u8, device=estimator.device, dtype=torch.float32)

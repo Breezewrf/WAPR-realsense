@@ -58,6 +58,8 @@ def parse_args(argv=None):
     parser.add_argument("--mesh-unit", choices=["m", "mm", "cm"], default="m")
     parser.add_argument("--mesh-scale", type=float, default=1.0)
     parser.add_argument("--backend", choices=["trt", "torch"], default="trt")
+    parser.add_argument("--object-mode", choices=["single", "multi"], default="single",
+                        help="TensorRT engine capacity: compact single-object or full multi-object profiles")
     parser.add_argument("--init", choices=["roi", "auto"], default="roi",
                         help="Manual ROI (default) or GroundingDINO/SAM2/DINOv2 CAD detection")
     parser.add_argument("--detect-interval", type=float, default=1.0, help="Seconds between unsuccessful auto searches")
@@ -249,12 +251,13 @@ def main(argv=None):
     mesh, diameter = load_mesh(args.mesh, args.mesh_unit, args.mesh_scale)
     print("LIVE_MESH", {"file": str(args.mesh), "extents_m": mesh.extents.tolist(),
                         "diameter_m": diameter, "unit": args.mesh_unit, "scale": args.mesh_scale}, flush=True)
-    estimator = WAPREstimator(device="cuda:0")
+    estimator = WAPREstimator(device="cuda:0", object_mode=args.object_mode)
     prepared = estimator.prepare_meshes([mesh])[0]
     output = args.output or Path.cwd() / "outputs" / "wapr_realsense" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     writer = PoseWriter(output)
     (output / "session.json").write_text(json.dumps({"mesh": str(args.mesh.resolve()), "mesh_unit": args.mesh_unit,
-        "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend, "init": args.init,
+        "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend,
+        "object_mode": args.object_mode, "init": args.init,
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
         "automatic_detection": None if args.init == "roi" else {
             "interval_s": args.detect_interval, "score_2d_min": args.detect_score,

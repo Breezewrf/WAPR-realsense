@@ -79,8 +79,38 @@ weights and persistent context state remain separate. Existing engines need no r
 Check all four engines together with `python scripts/check_trt_memory.py --run` (synthetic
 12/6-candidate inputs, not an accuracy test), then run the application with `--backend trt`.
 `WAPR_TRT_CONTEXT` reports each requirement; `WAPR_TRT_MEMORY` reports the allocated shared buffer.
-This memory path needs Jetson validation. `WAPR_TRT_SHARED_MEMORY=0` restores separate context
-allocations for comparison and may exhaust memory on Orin NX 16GB.
+The operator measured 13,460.52 MiB of separate execution requirements versus a 4,266.14 MiB
+shared buffer on Orin NX 16GB. Synthetic inference reported non-finite outputs, so TensorRT
+numerical correctness and pose tracking remain unverified. `WAPR_TRT_SHARED_MEMORY=0` restores
+separate context allocations and may exhaust memory on Orin NX 16GB.
+
+Choose engine capacity with `--object-mode single|multi` (application/export default: `single`).
+With the current recipe, single mode exports profiles `2/12/12` and four pose engines; multi mode
+exports `2/12/120` and adds `wbps_batch`. Single-object tracking uses `wbps.engine` directly.
+The RealSense UI still tracks one target; this option selects engine capacity, not a multi-target UI.
+Existing `2/12/120` engines remain accepted in single mode.
+
+```bash
+export WAPR_TRT_WORKSPACE_GB=4
+python -m wapr.export_engines --object-mode single                     # four engines, sequentially
+python -m wapr.export_engines --object-mode single --engine sapr       # only SAPR
+python -m wapr.export_engines --object-mode multi --engine wbps_batch  # only the multi-object scorer
+python -m wapr.export_engines --object-mode multi                      # full multi-object set
+python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single
+```
+
+Each engine exports in a fresh process; the process exits before the next one starts. PyTorch
+export models and input tensors are released before TensorRT building. Exporting a selected
+engine replaces only its corresponding file in the existing cache; modes share the same paths.
+To investigate non-finite outputs without rebuilding, run the same model/input in separate processes:
+
+```bash
+python scripts/check_trt_memory.py --run --models wapr_w_mask --memory shared
+python scripts/check_trt_memory.py --run --models wapr_w_mask --memory private
+```
+
+The diagnostic reports NaN/Inf counts for every tested output/batch and exits nonzero if any fail.
+Use `--input random` for a second synthetic input set; neither input set validates pose accuracy.
 
 Drag a tight box in the frozen image and press Enter/Space. In the live window:
 `r` reinitializes, `s` saves RGB-D and pose, and `q`/Esc exits.

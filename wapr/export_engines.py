@@ -420,96 +420,104 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
     Path(engine_path).write_bytes(pack_engine(bytes(serialized), read_onnx_metadata(onnx_path)))
 
 
-def main():
-    """
-    # Write FP32 ONNX using an opset supported by torch (up to 17), then a TensorRT 8.5+/10 FP16 engine.
+POSE_ENGINES = ("wapr_w_mask", "wapr_wo_mask", "sapr", "wbps")
+ENGINE_NAMES = POSE_ENGINES + ("wbps_batch", "wbps_tracking")
 
-        The four names are wapr_w_mask, wapr_wo_mask, sapr, and wbps.
 
-        A and B are (batch, channels, crop_px, crop_px).
+def export_plan(object_mode, engine="all"):
+    """A single-object export needs no independent-object scorer."""
+    from wapr.engine_profile import pose_profile
+    pose_profile(object_mode)
+    if engine not in ("all", *ENGINE_NAMES):
+        raise ValueError("Unknown engine: " + engine)
+    if engine == "wbps_batch" and object_mode != "multi":
+        raise ValueError("wbps_batch requires --object-mode multi")
+    if engine != "all":
+        return (engine,)
+    return POSE_ENGINES + (("wbps_batch",) if object_mode == "multi" else ())
 
-        WBPS batch is one group's length L, never several objects stacked.
 
-        Run it as python -m wapr.export_engines.
-
-        The if __name__ block is the caller.
-
-    ## Returns
-
-        - Returns None.
-
-    ---
-
-    # 在每份权重旁写 FP32 ONNX，使用 torch 支持且不高于 17 的 opset，再写 TensorRT 10 FP16 引擎。
-
-        四个名字是 wapr_w_mask、wapr_wo_mask、sapr 和 wbps。
-
-        A 和 B 是 (batch, channels, crop_px, crop_px)。
-
-        WBPS 的 batch 是一组的长度 L，不拼接多个物体。
-
-        运行方式是 python -m wapr.export_engines。
-
-        由 if __name__ 块调用。
-
-    ## 返回
-
-        - 返回 None。
-    """
+def _export_pose_onnx(name, object_mode):
+    """Return shapes after dropping all references to the PyTorch export model."""
     import tensorrt as trt
-    device = "cuda:0"
-    export_options = onnx_export_options(trt.__version__)
-    group = int(recipe.n_view * recipe.n_inplane)
-    if group not in wbps_group_sizes:
-        raise ValueError("recipe pose group %d is unsupported" % group)
-    min_batch = min(wbps_group_sizes)
-    opt_batch = group
-    max_batch = max(wbps_group_sizes)
-    for name in ("wapr_w_mask", "wapr_wo_mask", "sapr", "wbps"):
-        ckpt = recipe.weight_file(name)
-        runner = load_net(name, ckpt, engine=None, device=device)
-        channels = int(recipe.channels[name])
-        px = int(recipe.crop_px)
-        if name == "wbps":
-            wrapped = _ScoreWrap(runner.module).to(device).eval()
-            out_names = ["within_group", "between_group"]
-            dyn_out = {key: {1: "batch"} for key in out_names}
-            export_batch = group
-        else:
-            wrapped = _RefineWrap(runner.module).to(device).eval()
-            out_names = ["trans", "rot"]
-            dyn_out = {key: {0: "batch"} for key in out_names}
-            export_batch = group
-        # Trace one supported group; refinement rows remain independent in multi-instance batches.
-        # 用一个合法组追踪导出；修正行在多实例批量计算中仍各自独立。
-        A = torch.zeros(export_batch, channels, px, px, device=device)
-        B = torch.zeros_like(A)
-        onnx_path = ckpt.with_suffix(".onnx")
-        torch.onnx.export(
-            wrapped,
-            (A, B),
-            str(onnx_path),
-            input_names=["A", "B"],
-            output_names=out_names,
-            dynamic_axes={"A": {0: "batch"}, "B": {0: "batch"}, **dyn_out},
-            **export_options,
-        )
-        print("exported", name, "group", group, "max_batch", max_batch, flush=True)
-        write_onnx_metadata(onnx_path, checkpoint_metadata(ckpt, name))
-        _build_fp16_engine(
-            onnx_path,
-            ckpt.with_suffix(".engine"),
-            _shape(min_batch, channels, px),
-            _shape(opt_batch, channels, px),
-            _shape(max_batch, channels, px),
-        )
-        print("engine", name, flush=True)
-    # Include the independent-object scorer for the default multi-instance path.
-    # 同时构建独立物体批量计算评分引擎，供默认多实例路径使用。
-    del wrapped, runner, A, B
+    from wapr.engine_profile import pose_profile
+    minimum, group, maximum = pose_profile(object_mode)
+    ckpt = recipe.weight_file(name)
+    runner = load_net(name, ckpt, engine=None, device="cuda:0")
+    channels, px = int(recipe.channels[name]), int(recipe.crop_px)
+    if name == "wbps":
+        wrapped = _ScoreWrap(runner.module).eval()
+        out_names = ["within_group", "between_group"]
+        dyn_out = {key: {1: "batch"} for key in out_names}
+    else:
+        wrapped = _RefineWrap(runner.module).eval()
+        out_names = ["trans", "rot"]
+        dyn_out = {key: {0: "batch"} for key in out_names}
+    A = torch.zeros(group, channels, px, px, device="cuda:0")
+    B = torch.zeros_like(A)
+    onnx_path = ckpt.with_suffix(".onnx")
+    torch.onnx.export(wrapped, (A, B), str(onnx_path), input_names=["A", "B"],
+                      output_names=out_names,
+                      dynamic_axes={"A": {0: "batch"}, "B": {0: "batch"}, **dyn_out},
+                      **onnx_export_options(trt.__version__))
+    write_onnx_metadata(onnx_path, checkpoint_metadata(ckpt, name))
+    print("exported", name, "object_mode", object_mode, "group", group, "max_batch", maximum, flush=True)
+    return onnx_path, ckpt.with_suffix(".engine"), tuple(
+        _shape(count, channels, px) for count in (minimum, group, maximum))
+
+
+def release_export_memory():
+    """Call after export model/tensor references have gone out of scope."""
+    import gc
+    gc.collect()
+    torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    from wapr.export_batch_engine import main as export_batch
-    export_batch()
+
+
+def _export_one(name, object_mode):
+    if name in POSE_ENGINES:
+        onnx_path, engine_path, shapes = _export_pose_onnx(name, object_mode)
+        release_export_memory()
+        _build_fp16_engine(onnx_path, engine_path, *shapes)
+        print("engine", name, flush=True)
+    elif name == "wbps_batch":
+        from wapr.export_batch_engine import main as export_batch
+        export_batch()
+    else:
+        from wapr.export_tracking_engine import main as export_tracking
+        export_tracking(object_mode=object_mode)
+
+
+def main(argv=None):
+    """Export selected engines sequentially, with one fresh process per engine."""
+    import argparse
+    import subprocess
+    from wapr.engine_profile import pose_profile
+    parser = argparse.ArgumentParser(description=__doc__ or main.__doc__)
+    parser.add_argument("--object-mode", choices=["single", "multi"], default="single",
+                        help="single: compact pose profile; multi: 120-row profile plus batched scoring")
+    parser.add_argument("--engine", choices=("all", *ENGINE_NAMES), default="all",
+                        help="Build just this engine, or the set needed by --object-mode")
+    parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    try:
+        plan = export_plan(args.object_mode, args.engine)
+    except ValueError as error:
+        parser.error(str(error))
+    if args._worker:
+        if len(plan) != 1:
+            parser.error("A worker must export exactly one engine")
+        _export_one(plan[0], args.object_mode)
+        return
+    print("WAPR_EXPORT_PLAN", {"object_mode": args.object_mode, "engines": plan,
+                               "profile": pose_profile(args.object_mode)}, flush=True)
+    for index, name in enumerate(plan, 1):
+        print("WAPR_EXPORT_START", {"engine": name, "index": index, "total": len(plan)}, flush=True)
+        # Wait for full process exit (including CUDA cleanup) before the next engine.
+        subprocess.run([sys.executable, "-u", "-m", "wapr.export_engines",
+                        "--object-mode", args.object_mode, "--engine", name, "--_worker"], check=True)
+        print("WAPR_EXPORT_DONE", {"engine": name, "index": index, "total": len(plan)}, flush=True)
+
 
 if __name__ == "__main__":
     main()

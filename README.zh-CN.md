@@ -75,8 +75,36 @@ TRT 模式直接加载引擎，不额外加载 PyTorch 网络权重。位姿引�
 先运行 `python scripts/check_trt_memory.py --run`，保留四个引擎并测试 12/6 候选的合成输入
 （不验证位姿精度），再用 `--backend trt` 启动应用。
 `WAPR_TRT_CONTEXT` 显示各引擎需求，`WAPR_TRT_MEMORY` 显示实际分配的共享缓冲大小。
-这条内存优化路径尚待 Jetson 验证；`WAPR_TRT_SHARED_MEMORY=0` 恢复各 context 单独分配，
-用于对比时可能再次耗尽 Orin NX 16GB 的内存。
+操作者在 Orin NX 16GB 上测得各自执行内存合计 13,460.52 MiB，共享缓冲为 4,266.14 MiB。
+合成输入出现非有限输出，TensorRT 数值正确性和位姿跟踪尚未通过验证。
+`WAPR_TRT_SHARED_MEMORY=0` 恢复各 context 单独分配，对比时可能再次耗尽内存。
+
+使用 `--object-mode single|multi` 选择引擎容量，应用和导出均默认 `single`。
+当前配置下，单物体模式导出 `2/12/12` profile 和四个主引擎；多物体模式使用 `2/12/120`，
+并增加 `wbps_batch`。单物体跟踪直接使用 `wbps.engine`，不要求额外跟踪引擎。
+RealSense 界面仍跟踪一个目标，此选项选择引擎容量，不会将界面改成多目标跟踪。
+单物体运行也接受已有的 `2/12/120` 引擎。
+
+```bash
+export WAPR_TRT_WORKSPACE_GB=4
+python -m wapr.export_engines --object-mode single                     # 依次导出四个主引擎
+python -m wapr.export_engines --object-mode single --engine sapr       # 仅导出 SAPR
+python -m wapr.export_engines --object-mode multi --engine wbps_batch  # 仅导出多物体评分引擎
+python -m wapr.export_engines --object-mode multi                      # 完整多物体引擎集
+python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single
+```
+
+每个引擎在独立进程中导出，进程退出后才开始下一个；构建 TensorRT 前释放 PyTorch 导出模型和输入张量。
+两个模式使用相同缓存路径，指定某个引擎只会替换对应文件。
+非有限输出先用同一模型、同一输入在两个独立进程中对比，无须重建：
+
+```bash
+python scripts/check_trt_memory.py --run --models wapr_w_mask --memory shared
+python scripts/check_trt_memory.py --run --models wapr_w_mask --memory private
+```
+
+诊断会打印每个 batch、每个输出的 NaN/Inf 数量，任何失败都会以非零状态退出。
+可加 `--input random` 对比随机合成输入；这些检查均不验证位姿精度。
 
 在冻结画面上紧贴目标拖出矩形框，Enter/空格确认。实时窗口中：
 `r` 重新初始化、`s` 保存 RGB-D 与结果、`q`/Esc 退出。

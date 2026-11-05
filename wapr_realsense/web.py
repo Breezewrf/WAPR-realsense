@@ -254,7 +254,7 @@ def track_camera(args, state):
     started = time.perf_counter()
     os.environ["WAPR_BACKEND"] = args.backend
     mesh, diameter = load_mesh(args.mesh, args.mesh_unit, args.mesh_scale)
-    estimator = WAPREstimator(device="cuda:0")
+    estimator = WAPREstimator(device="cuda:0", object_mode=args.object_mode)
     prepared = estimator.prepare_meshes([mesh])[0]
     initializer = build_initializer(args, estimator, mesh, prepared, diameter)
     output = args.output or Path.cwd() / "outputs" / "wapr_realsense" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -265,6 +265,7 @@ def track_camera(args, state):
         (output / "session.json").write_text(json.dumps({
             "mesh": str(args.mesh.resolve()), "mesh_unit": args.mesh_unit,
             "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend,
+            "object_mode": args.object_mode,
             "init": args.init, "web": True, "minimum_score": args.min_score,
             "camera_frame": args.camera_frame, "object_frame": args.object_frame,
             "pose_convention": "original_scaled_mesh_to_color_optical_frame",
