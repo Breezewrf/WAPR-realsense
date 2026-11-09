@@ -360,3 +360,5 @@ footer span {
     font-size:10px
   }
 }
+
+.status[data-status="RECOVERING"] { border-color: #d99a24; }

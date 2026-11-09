@@ -3,6 +3,11 @@ mesh_unit: m
 mesh_scale: 1.0
 backend: trt
 
+tracking_recovery:
+  activate: true
+  timeout_s: 1.0
+  confirm_frames: 2
+
 kalman_motion_prediction:
   activate: true
   translation_measurement_std_m: 0.01

@@ -68,17 +68,26 @@ class PoseKalman:
         self.pose = np.array(pose, dtype=np.float64, copy=True)
         self.last_measurement = self.pose.copy()
         self.timestamp = float(timestamp)
+        self.measurement_timestamp = self.timestamp
+        self.request_timestamp = self.timestamp
         self.velocity = np.zeros(6)
         s = self.settings
         self.noise = np.diag([s.translation_measurement_std_m**2] * 3
                              + [s.rotation_measurement_std_rad**2] * 3)
         self.covariance = np.diag(np.r_[np.diag(self.noise), [0.5**2] * 3, [1.0**2] * 3])
 
-    def predict(self, timestamp):
-        dt = float(timestamp) - self.timestamp
-        if not np.isfinite(dt) or dt <= 0 or dt > self.settings.max_dt_s:
+    def predict(self, timestamp, limit_horizon=False):
+        timestamp = float(timestamp)
+        gap = timestamp - self.request_timestamp
+        if not np.isfinite(gap) or gap <= 0 or gap > self.settings.max_dt_s:
             # Repeated/backward clocks and long gaps must not extrapolate stale speed.
             self.initiate(self.last_measurement, timestamp)
+            return self.pose.astype(np.float32)
+        self.request_timestamp = timestamp
+        if limit_horizon:
+            timestamp = min(timestamp, self.measurement_timestamp + self.settings.max_dt_s)
+        dt = timestamp - self.timestamp
+        if dt <= 0:
             return self.pose.astype(np.float32)
         delta = self.velocity[3:] * dt
         rotation_step = self.rotation.from_rotvec(delta).as_matrix()
@@ -116,3 +125,5 @@ class PoseKalman:
         covariance = reset @ covariance @ reset.T
         self.covariance = (covariance + covariance.T) / 2
         self.last_measurement = measurement.copy()
+        self.timestamp = self.request_timestamp
+        self.measurement_timestamp = self.timestamp

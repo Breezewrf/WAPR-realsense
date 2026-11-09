@@ -83,7 +83,7 @@ class KalmanPredictionTests(unittest.TestCase):
 class KalmanSessionTests(unittest.TestCase):
     def session(self, enabled=True):
         estimator = Mock()
-        estimator.estimate_one_category_one_instance.return_value = {"pose_4x4": pose_at(0), "score_6d": 0.9}
+        estimator.estimate_one_category_one_instance.return_value = {"pose_4x4": pose_at(0), "score_6d": 0.9, "hypothesis": "sapr_center"}
         track = Mock()
         session = PoseSession(estimator, object(), 0.5, track_function=track,
                               kalman_settings=KalmanSettings(activate=enabled))
@@ -93,7 +93,7 @@ class KalmanSessionTests(unittest.TestCase):
     def test_predicts_tracking_input_and_publishes_unfiltered_wapr_result(self):
         session, track = self.session()
         for index in range(1, 10):
-            row = {"pose_4x4": pose_at(index / 10), "score_6d": 0.9}
+            row = {"pose_4x4": pose_at(index / 10), "score_6d": 0.9, "hypothesis": "sapr_center"}
             track.return_value = [row]
             status, published = session.step(frame_at(index / 10))
             self.assertEqual(status, "tracking")
@@ -105,14 +105,14 @@ class KalmanSessionTests(unittest.TestCase):
 
     def test_disabled_uses_previous_pose(self):
         session, track = self.session(enabled=False)
-        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9}]
+        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9, "hypothesis": "sapr_center"}]
         session.step(frame_at(0.1))
         session.step(frame_at(0.2))
         np.testing.assert_allclose(track.call_args.args[4][0]["pose_4x4"], pose_at(0.1), atol=1e-7)
 
     def test_loss_reset_and_reinitialization_clear_motion(self):
         session, track = self.session()
-        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9}]
+        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9, "hypothesis": "sapr_center"}]
         session.step(frame_at(0.1))
         track.return_value = [{"pose_4x4": pose_at(10), "score_6d": 0.1}]
         self.assertEqual(session.step(frame_at(0.2)), ("lost", None))
@@ -124,8 +124,8 @@ class KalmanSessionTests(unittest.TestCase):
         self.assertIsNone(session.motion.pose)
 
     def test_automatic_initialization_seeds_zero_velocity(self):
-        initialize = Mock(return_value={"pose_4x4": pose_at(0), "score_6d": 0.9})
-        track = Mock(return_value=[{"pose_4x4": pose_at(0.1), "score_6d": 0.9}])
+        initialize = Mock(return_value={"pose_4x4": pose_at(0), "score_6d": 0.9, "hypothesis": "sapr_center"})
+        track = Mock(return_value=[{"pose_4x4": pose_at(0.1), "score_6d": 0.9, "hypothesis": "sapr_center"}])
         session = PoseSession(Mock(), object(), 0.5, initializer=initialize,
                               track_function=track, kalman_settings=KalmanSettings(activate=True))
         self.assertEqual(session.step(frame_at(0))[0], "initialized_auto")
@@ -136,13 +136,13 @@ class KalmanSessionTests(unittest.TestCase):
     def test_prediction_with_nonpositive_depth_falls_back_to_measurement(self):
         session, track = self.session()
         session.motion.velocity[2] = -20
-        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9}]
+        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9, "hypothesis": "sapr_center"}]
         session.step(frame_at(0.1))
         np.testing.assert_allclose(track.call_args.args[4][0]["pose_4x4"], pose_at(0), atol=1e-7)
 
     def test_clock_domain_change_and_invalid_sensor_time(self):
         session, track = self.session()
-        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9}]
+        track.return_value = [{"pose_4x4": pose_at(0.1), "score_6d": 0.9, "hypothesis": "sapr_center"}]
         session.step(frame_at(0.1))
         session.step(replace(frame_at(0.2), timestamp_domain="new_sensor"))
         np.testing.assert_allclose(track.call_args.args[4][0]["pose_4x4"], pose_at(0.1), atol=1e-7)

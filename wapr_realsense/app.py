@@ -23,6 +23,7 @@ from .output import PoseWriter, pose_record, save_snapshot
 from .tracker import PoseSession
 from .initialization import build_initializer
 from .kalman import KalmanSettings, settings_from_args
+from .recovery import RecoverySettings, recovery_from_args
 
 
 def _flatten_detection_config(config):
@@ -74,6 +75,12 @@ def parse_args(argv=None):
         if field.name != "activate":
             parser.add_argument("--kalman-" + field.name.replace("_", "-"), type=float,
                                 default=field.default)
+    recovery_options = parser.add_mutually_exclusive_group()
+    recovery_options.add_argument("--tracking-recovery", dest="recovery_activate", action="store_true", default=False,
+                                  help="Retry unreliable tracks within a bounded recovery window")
+    recovery_options.add_argument("--no-tracking-recovery", dest="recovery_activate", action="store_false")
+    parser.add_argument("--recovery-timeout-s", type=float, default=1.0)
+    parser.add_argument("--recovery-confirm-frames", type=int, default=2)
     reuse_options = parser.add_mutually_exclusive_group()
     reuse_options.add_argument("--reuse-tracking", action="store_true", default=True,
                               help="Reuse identical full-preset branches and crops (default)")
@@ -122,6 +129,18 @@ def parse_args(argv=None):
             config = yaml.safe_load(content)
             if not isinstance(config, dict):
                 raise ValueError("Configuration must be a mapping")
+            section_name = "tracking_recovery"
+            names = {field.name: "recovery_" + field.name for field in fields(RecoverySettings)}
+            if any(name in config for name in names.values()):
+                raise ValueError("Configure recovery options inside %s" % section_name)
+            if section_name in config:
+                section = config.pop(section_name)
+                if not isinstance(section, dict):
+                    raise ValueError("%s must be a mapping" % section_name)
+                for name, value in section.items():
+                    if name not in names:
+                        raise ValueError("Unknown configuration field: %s.%s" % (section_name, name))
+                    config[names[name]] = value
             section_name = "kalman_motion_prediction"
             kalman_names = {field.name: "kalman_" + field.name for field in fields(KalmanSettings)}
             if any(name in config for name in kalman_names.values()):
@@ -169,6 +188,7 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     try:
         settings_from_args(args)
+        recovery_from_args(args)
     except ValueError as error:
         parser.error(str(error))
     if args.web_demo:
@@ -301,6 +321,7 @@ def main(argv=None):
         "profile_tracking": args.profile_tracking,
         "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
         "kalman_motion_prediction": asdict(settings_from_args(args)),
+        "tracking_recovery": asdict(recovery_from_args(args)),
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
         "automatic_detection": None if args.init == "roi" else {
             "interval_s": args.detect_interval, "score_2d_min": args.detect_score,
@@ -316,7 +337,7 @@ def main(argv=None):
         session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
                               initializer=initializer, detect_interval=args.detect_interval,
                               tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking,
-                              kalman_settings=settings_from_args(args))
+                              kalman_settings=settings_from_args(args), recovery_settings=recovery_from_args(args))
         if args.replay:
             last_frame = replay(args, session, mesh, output, writer, tracking_timing)
             return

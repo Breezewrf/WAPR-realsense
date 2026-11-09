@@ -5,6 +5,7 @@ const hints = {
   INITIALIZED: "Ready. Click Detect to find the object.",
   "Looking for object": "Searching. Tracking starts automatically.",
   TRACKING: "Object found. Pose tracking is active.",
+  RECOVERING: "目标暂时失效，正在尝试恢复",
   ERROR: "The session needs attention. See the error below.",
   STOPPED: "The session has stopped."
 };

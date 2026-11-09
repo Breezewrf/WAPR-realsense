@@ -45,11 +45,11 @@ class Dashboard:
     def snapshot(self):
         with self.lock:
             return {"status": self.status, "error": self.error, "demo": self.demo,
-                    "can_detect": self.status in ("INITIALIZED", "TRACKING"),
+                    "can_detect": self.status in ("INITIALIZED", "TRACKING", "RECOVERING"),
                     "manual": self.manual, "notice": self.notice,
                     "selection_token": self.selection[0] if self.selection else None,
                     "has_frame": self.image is not None,
-                    "can_change_mode": self.status in ("INITIALIZED", "TRACKING"),
+                    "can_change_mode": self.status in ("INITIALIZED", "TRACKING", "RECOVERING"),
                     "image_version": self.image_version,
                     "timings": {part: list(lines) for part, lines in self.timings.items()},
                     "search_part": self.search_part}
@@ -58,7 +58,7 @@ class Dashboard:
         with self.lock:
             if generation is not None and generation != self.generation:
                 return
-            if status == "TRACKING" and (self.detect.is_set() or self.mode_changed.is_set()):
+            if status in ("TRACKING", "RECOVERING") and (self.detect.is_set() or self.mode_changed.is_set()):
                 return  # A newer Detect command takes priority over this result.
             self.status, self.error = status, error
             self.notice = notice
@@ -72,7 +72,7 @@ class Dashboard:
 
     def request_mode(self, manual):
         with self.lock:
-            if self.status not in ("INITIALIZED", "TRACKING"):
+            if self.status not in ("INITIALIZED", "TRACKING", "RECOVERING"):
                 return False
             if self.manual == manual:
                 return True
@@ -92,7 +92,7 @@ class Dashboard:
 
     def freeze_selection(self):
         with self.lock:
-            if not self.manual or self.status not in ("INITIALIZED", "TRACKING"):
+            if not self.manual or self.status not in ("INITIALIZED", "TRACKING", "RECOVERING"):
                 raise ValueError("Manual selection is unavailable in the current state")
             if self.preview_frame is None or self.image is None:
                 raise ValueError("Wait for a camera frame before drawing a box")
@@ -103,7 +103,7 @@ class Dashboard:
 
     def request_detect(self, bbox=None, token=None):
         with self.lock:
-            if self.status not in ("INITIALIZED", "TRACKING"):
+            if self.status not in ("INITIALIZED", "TRACKING", "RECOVERING"):
                 return False
             selected = None
             if self.manual:
@@ -250,6 +250,7 @@ def track_camera(args, state):
     from .tracker import PoseSession
     from dataclasses import asdict
     from .kalman import settings_from_args
+    from .recovery import recovery_from_args
 
     if not torch.cuda.is_available():
         raise RuntimeError("WAPR requires working CUDA PyTorch")
@@ -271,6 +272,7 @@ def track_camera(args, state):
             "profile_tracking": args.profile_tracking,
             "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
             "kalman_motion_prediction": asdict(settings_from_args(args)),
+            "tracking_recovery": asdict(recovery_from_args(args)),
             "init": args.init, "web": True, "minimum_score": args.min_score,
             "camera_frame": args.camera_frame, "object_frame": args.object_frame,
             "pose_convention": "original_scaled_mesh_to_color_optical_frame",
@@ -305,7 +307,7 @@ def track_camera(args, state):
             session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
                                   initializer=initializer, detect_interval=args.detect_interval,
                                   tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking,
-                                  kalman_settings=settings_from_args(args))
+                                  kalman_settings=settings_from_args(args), recovery_settings=recovery_from_args(args))
             state.set_status("INITIALIZED")
             active, number, count, manual_attempts = False, frame.number, 0, 0
             while not state.stop.is_set() and (not args.max_frames or count < args.max_frames):
@@ -353,6 +355,8 @@ def track_camera(args, state):
                         continue
                     if row is not None:
                         state.set_status("TRACKING", generation=generation)
+                    elif status == "recovering":
+                        state.set_status("RECOVERING", notice="目标暂时失效，正在尝试恢复", generation=generation)
                     elif manual:
                         active = False
                         notice = "初始化失败，请重新手动框选" if bbox is not None else "目标丢失，请重新手动框选"

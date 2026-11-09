@@ -2,6 +2,11 @@ mesh: ../assets/meshes/your_target/model.obj
 mesh_unit: m
 mesh_scale: 1.0
 backend: trt
+
+tracking_recovery:
+  activate: true
+  timeout_s: 1.0
+  confirm_frames: 2
 kalman_motion_prediction:
   activate: true
 groundingdino_sam2_dinov2_detect:

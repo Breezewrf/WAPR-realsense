@@ -324,13 +324,43 @@ The filter uses actual sensor timestamp intervals (host reception time if unavai
 12-dimensional position/rotation-error/velocity state, and SO(3) rotation increments.
 Duplicate/backward timestamps, clock-domain changes or gaps exceeding `max_dt_s` discard
 stale velocity. Initialization, reset and tracking loss also restart the filter. Prediction
-behind the camera falls back to the last accepted pose. Single-frame loss/reinitialization
-rules still apply; this addition does not provide occlusion recovery.
+behind the camera falls back to the last accepted pose. The optional recovery window below controls retries after loss; motion prediction alone
+does not provide occlusion recovery.
 
 The design references [FoundationPose++'s Kalman motion predictor](https://github.com/teal024/FoundationPose-plus-plus/blob/master/src/utils/kalman_filter_6d.py),
 with sensor-time prediction and rotation errors replacing fixed time steps and Euler angles.
 Settings are saved in `session.json`. CPU tests cover synthetic motion prediction and lifecycle
 routing; improvement on live RGB-D input and Jetson overhead still require measurement.
+
+### Short tracking failures
+
+Target sample configs enable a bounded recovery window:
+
+```yaml
+tracking_recovery:
+  activate: true
+  timeout_s: 1.0
+  confirm_frames: 2
+```
+
+After an established track fails, `recovering` retains its last accepted pose and Kalman
+state, and continues refinement on new frames. Outputs have `valid=false` and null pose;
+the preview does not draw a predicted box. Rejected candidates never update the filter.
+Two consecutive distinct frames with accepted WAPR/SAPR refinement restore tracking.
+Unrefined previous/center candidates do not confirm recovery or update Kalman.
+Prediction is capped at `kalman_motion_prediction.max_dt_s` since the last refined observation
+(default 0.5 s); its endpoint is then held while refinement continues. Clock discontinuities
+or invalid predictions discard stale velocity. Without Kalman, retries use the last accepted pose.
+
+The window starts at the first failure and is not extended by repeated failures. At 1 s,
+state is cleared: manual mode waits for a new ROI; auto mode searches again. Failed initial
+registration does not enter recovery. Reset, Detect and mode changes also clear recovery state.
+The browser displays `RECOVERING` while continuing inference; `[RECOVERY]` logs record
+entry, success and timeout. Attempts remain part of tracking timings; settings are saved
+in `session.json`. No-config runs default to disabled. Override with `--tracking-recovery`
+or `--no-tracking-recovery`, or tune `--recovery-timeout-s` and `--recovery-confirm-frames`.
+This adds no visual tracker or occlusion model. CPU lifecycle tests do not establish live
+recovery accuracy or Jetson performance.
 
 ### Jetson tracking measurements
 

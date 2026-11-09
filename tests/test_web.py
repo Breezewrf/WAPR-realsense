@@ -204,6 +204,64 @@ class DashboardTests(unittest.TestCase):
         initialized.warmup.assert_called_once()
         self.assertEqual(initialized.call_count, 2)
 
+    def test_manual_and_auto_web_keep_running_during_recovery(self):
+        import wapr
+        for manual in (True, False):
+            with self.subTest(manual=manual), tempfile.TemporaryDirectory() as folder:
+                state = Dashboard(manual=manual)
+                reads, statuses = [], []
+                good = result()
+                good["hypothesis"] = "sapr_center"
+                tracker = ModuleType("wapr.tracking")
+                tracker.track_many_categories_many_instances = Mock(side_effect=[[good]] * 3 + [[], [good], [good]])
+                estimator = Mock(device=None)
+                estimator.estimate_one_category_one_instance.return_value = good
+                mesh = Mock(bounds=np.array([[-.1, -.1, -.1], [.1, .1, .1]]))
+                estimator.prepare_meshes.return_value = [mesh]
+                initializer = Mock(return_value=good) if not manual else None
+
+                class Camera:
+                    info = {"name": "test"}
+                    def __init__(self, *args): pass
+                    def __enter__(self): return self
+                    def __exit__(self, *args): pass
+                    def read(self, **kwargs):
+                        index = len(reads)
+                        statuses.append(state.snapshot()["status"])
+                        if index == 2:
+                            if manual:
+                                token = state.freeze_selection()["token"]
+                                state.request_detect([1, 1, 5, 5], token)
+                            else:
+                                state.request_detect()
+                        current = frame()
+                        current.number, current.timestamp_ms = index, index * 70
+                        reads.append(current)
+                        return current
+
+                args = parse_args(["--web", "--init", "roi" if manual else "auto",
+                                   "--tracking-recovery", "--max-frames", "5", "--output", folder])
+                with patch.dict(wapr.__dict__, {"WAPREstimator": Mock(return_value=estimator)}), \
+                        patch.dict("sys.modules", {"wapr.tracking": tracker}), \
+                        patch("torch.cuda.is_available", return_value=True), \
+                        patch("wapr_realsense.camera.RealSenseCamera", Camera), \
+                        patch("wapr_realsense.geometry.load_mesh", return_value=(mesh, .4)), \
+                        patch("wapr_realsense.geometry.draw_pose", return_value=frame().rgb), \
+                        patch("wapr_realsense.initialization.warmup_pose_inputs"), \
+                        patch("wapr_realsense.initialization.build_initializer", return_value=initializer), \
+                        redirect_stdout(io.StringIO()):
+                    track_camera(args, state)
+                records = [json.loads(line) for line in (Path(folder) / "poses.jsonl").read_text().splitlines()]
+                self.assertEqual([r["status"] for r in records][-4:], ["recovering", "recovering", "tracking", "stopped"])
+                self.assertFalse(records[-4]["valid"])
+                self.assertIsNone(records[-3]["pose_4x4"])
+                self.assertEqual(statuses[-2:], ["RECOVERING", "RECOVERING"])
+                self.assertEqual(estimator.estimate_one_category_one_instance.call_count, int(manual))
+                if initializer is not None:
+                    initializer.assert_called_once()
+                metadata = json.loads((Path(folder) / "session.json").read_text())
+                self.assertTrue(metadata["tracking_recovery"]["activate"])
+
     def test_web_cli_validates_mode_and_never_needs_a_desktop_display(self):
         self.assertTrue(parse_args(["--web-demo", "--no-display"]).web)
         self.assertTrue(parse_args(["--web", "--init", "auto"]).web)

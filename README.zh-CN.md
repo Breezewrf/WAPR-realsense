@@ -301,11 +301,38 @@ python -m wapr_realsense --config configs/box.yaml --no-kalman
 旋转误差、线速度和角速度共 12 维，旋转通过 SO(3) 增量更新。
 时间戳重复、倒退、时钟域变化或间隔超过 `max_dt_s` 时丢弃旧速度；初始化、重置和
 跟踪丢失也会重新建立滤波状态。预测深度非正时退回最近可靠位姿。
-当前单帧失败触发丢失及重新初始化的规则继续生效，此功能不提供遮挡恢复。
+可通过下述恢复窗口控制失效后的重试；运动预测本身不提供遮挡恢复。
 
 设计参考 [FoundationPose++ 的 Kalman 运动预测](https://github.com/teal024/FoundationPose-plus-plus/blob/master/src/utils/kalman_filter_6d.py)，
 使用传感器时间间隔及旋转误差替代固定步长和欧拉角。配置记录在 `session.json`。
 CPU 测试覆盖合成运动预测和跟踪状态传递；真实 RGB-D 跟踪收益及 Jetson 开销仍需实测。
+
+### 短暂失效恢复
+
+目标示例配置默认开启有限时间的恢复窗口：
+
+```yaml
+tracking_recovery:
+  activate: true
+  timeout_s: 1.0
+  confirm_frames: 2
+```
+
+已建立的跟踪失效后进入 `recovering`，保留最近接受的位姿和 Kalman 状态，在后续新帧继续精修。
+期间输出 `valid=false` 和空位姿，预览不绘制预测框；拒绝结果不更新滤波器。
+连续两个不同采集帧的 WAPR/SAPR 精修结果通过原有评分及位姿检查后恢复跟踪。
+未经精修的 previous/center 候选不能确认恢复，也不更新 Kalman。
+累计预测从最近一次可靠精修观测起最多持续 `kalman_motion_prediction.max_dt_s`（默认0.5秒），
+随后保持该预测终点继续精修；时间戳异常或预测无效时丢弃旧速度。
+关闭 Kalman 时仍可恢复，直接使用最近接受的位姿重试。
+
+窗口从第一次失效开始，不因后续失败延长。默认1秒后清空状态，手动模式等待重新框选，
+自动模式重新搜索。首次初始化失败不进入恢复；重置、Detect 和模式切换也会清空恢复状态。
+Web 显示 `RECOVERING` 并继续推理；终端 `[RECOVERY]` 记录进入、成功及超时事件。
+恢复尝试计入跟踪耗时，配置写入 `session.json`。无配置启动默认关闭，可用
+`--tracking-recovery` / `--no-tracking-recovery` 覆盖开关，通过 `--recovery-timeout-s`
+和 `--recovery-confirm-frames` 调整参数。本功能没有增加视觉跟踪器或遮挡模型；
+CPU 状态机测试不代表真实恢复效果或 Jetson 性能已验证。
 
 ### Jetson 跟踪实测
 
