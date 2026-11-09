@@ -26,10 +26,7 @@ class BuilderSettingsTests(unittest.TestCase):
 
     def test_workspace_defaults_override_and_invalid_values(self):
         with patch.dict(os.environ, {}, clear=True):
-            with patch("wapr.trt_compat.platform.machine", return_value="aarch64"):
-                self.assertEqual(workspace_bytes(), 1024 ** 3)
-            with patch("wapr.trt_compat.platform.machine", return_value="x86_64"):
-                self.assertEqual(workspace_bytes(), 8 * 1024 ** 3)
+            self.assertEqual(workspace_bytes(), 4 * 1024 ** 3)
             os.environ["WAPR_TRT_WORKSPACE_GB"] = "0.5"
             self.assertEqual(workspace_bytes(), 512 * 1024 ** 2)
             for value in ("0", "-1", "nan", "inf", "invalid"):

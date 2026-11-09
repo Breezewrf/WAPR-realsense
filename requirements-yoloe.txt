@@ -1,0 +1,2 @@
+# Optional reference-guided 2D detection; install into the existing WAPR GPU environment.
+ultralytics==8.4.202

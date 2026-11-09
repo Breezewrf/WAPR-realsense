@@ -24,6 +24,7 @@ from .tracker import PoseSession
 from .initialization import build_initializer
 from .kalman import KalmanSettings, settings_from_args
 from .recovery import RecoverySettings, recovery_from_args
+from .yoloe import build_yoloe
 
 
 def _flatten_detection_config(config):
@@ -52,6 +53,12 @@ def _flatten_detection_config(config):
             value = "auto" if value else "roi"
         config[target] = value
     return config
+
+
+def yoloe_metadata(args):
+    return {name[6:]:
+            str(value) if isinstance(value, Path) else value
+            for name, value in vars(args).items() if name.startswith("yoloe_")}
 
 
 def parse_args(argv=None):
@@ -99,6 +106,16 @@ def parse_args(argv=None):
     sam_options.add_argument("--no-detect-use-sam", action="store_false", dest="detect_use_sam",
                              help="Use bounding boxes without SAM2")
     parser.add_argument("--template-cache", type=Path, help="Optional CAD template .pt cache; otherwise kept in GPU memory")
+    yoloe_options = parser.add_mutually_exclusive_group()
+    yoloe_options.add_argument("--yoloe", dest="yoloe_activate", action="store_true", default=False)
+    yoloe_options.add_argument("--no-yoloe", dest="yoloe_activate", action="store_false")
+    parser.add_argument("--yoloe-model", default="yoloe-26s-seg.pt")
+    parser.add_argument("--yoloe-prompt-embeddings", type=Path,
+                        help="Pre-encoded target NPZ from examples/camera_yoloe_fuse.py")
+    parser.add_argument("--yoloe-conf", type=float, default=0.05)
+    parser.add_argument("--yoloe-imgsz", type=int, default=640)
+    parser.add_argument("--yoloe-device", default="0")
+    parser.add_argument("--yoloe-max-candidates", type=int, default=3)
     parser.add_argument("--serial", help="Select a camera by serial number")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -129,6 +146,18 @@ def parse_args(argv=None):
             config = yaml.safe_load(content)
             if not isinstance(config, dict):
                 raise ValueError("Configuration must be a mapping")
+            section = config.pop("yoloe_detection", {})
+            if not isinstance(section, dict):
+                raise ValueError("yoloe_detection must be a mapping")
+            allowed = ("activate", "model", "prompt_embeddings",
+                       "conf", "imgsz", "device", "max_candidates")
+            for name, value in section.items():
+                if name not in allowed or "yoloe_" + name in config:
+                    raise ValueError("Unknown or duplicate yoloe_detection field: %s" % name)
+                if name == "model" and isinstance(value, str) and str(Path(value).parent) != ".":
+                    path = Path(value).expanduser()
+                    value = str(path if path.is_absolute() else (preliminary.config.resolve().parent / path).resolve())
+                config["yoloe_" + name] = value
             section_name = "tracking_recovery"
             names = {field.name: "recovery_" + field.name for field in fields(RecoverySettings)}
             if any(name in config for name in names.values()):
@@ -162,7 +191,7 @@ def parse_args(argv=None):
                 parser.error("Unknown configuration field: %s" % name)
             action = actions[name]
             if value is None:
-                if name not in ("serial", "bbox", "output", "replay", "template_cache"):
+                if name not in ("serial", "bbox", "output", "replay", "template_cache", "yoloe_prompt_embeddings"):
                     parser.error("Configuration field %s cannot be null" % name)
             elif action.type is Path:
                 if not isinstance(value, str):
@@ -191,6 +220,12 @@ def parse_args(argv=None):
         recovery_from_args(args)
     except ValueError as error:
         parser.error(str(error))
+    if not np.isfinite(args.yoloe_conf) or not 0 <= args.yoloe_conf <= 1:
+        parser.error("YOLOE confidence must be between 0 and 1")
+    if args.yoloe_imgsz <= 0 or args.yoloe_max_candidates <= 0:
+        parser.error("YOLOE image size and maximum candidates must be positive")
+    if args.yoloe_activate and args.yoloe_prompt_embeddings is None:
+        parser.error("YOLOE requires prompt_embeddings; create the NPZ with examples/camera_yoloe_fuse.py")
     if args.web_demo:
         args.web = True
     if not 1 <= args.web_port <= 65535:
@@ -322,6 +357,7 @@ def main(argv=None):
         "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
         "kalman_motion_prediction": asdict(settings_from_args(args)),
         "tracking_recovery": asdict(recovery_from_args(args)),
+        "yoloe_detection": yoloe_metadata(args),
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
         "automatic_detection": None if args.init == "roi" else {
             "interval_s": args.detect_interval, "score_2d_min": args.detect_score,
@@ -337,7 +373,8 @@ def main(argv=None):
         session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
                               initializer=initializer, detect_interval=args.detect_interval,
                               tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking,
-                              kalman_settings=settings_from_args(args), recovery_settings=recovery_from_args(args))
+                              kalman_settings=settings_from_args(args), recovery_settings=recovery_from_args(args),
+                              recovery_detector=build_yoloe(args))
         if args.replay:
             last_frame = replay(args, session, mesh, output, writer, tracking_timing)
             return

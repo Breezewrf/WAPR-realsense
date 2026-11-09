@@ -82,6 +82,9 @@ def build_initializer(args, estimator, mesh, prepared_mesh, diameter_m):
     """Keep ROI mode free of detector imports, downloads and template rendering."""
     if args.init != "auto":
         return None
+    if getattr(args, "yoloe_activate", False):
+        from .yoloe import YOLOEInitializer, build_yoloe
+        return YOLOEInitializer(estimator, build_yoloe(args), prepared_mesh, diameter_m, args.min_score)
     from wapr.det2d import WAPRDet2D, onboard_meshes
 
     template = onboard_meshes(

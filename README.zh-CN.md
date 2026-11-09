@@ -2,458 +2,257 @@
 
 [English](README.md)
 
-**RealSense RGB-D 输入，持续输出单个目标的 6D 位姿。** 基于
-[WAPR](https://github.com/WangYuLin-SEU/WAPR)，面向 robotics 的单类别、单实例、已知 mesh 场景。
-支持手动框选或可选的自动检测初始化，之后逐帧跟踪；默认 ROI 模式不加载检测模型。
+基于 [WAPR](https://github.com/WangYuLin-SEU/WAPR) 的 RealSense RGB-D 单目标 6D 位姿跟踪。
+本项目使用 **YOLOE 参考图检测替代 WAPR 原有的 GroundingDINO + SAM2 + DINOv2 三模型路线**，
+并加入 Kalman 预测和短暂失效恢复，用于自动初始化、跟踪和重新定位。
+根据本地使用反馈，YOLOE 方案的检测初始化速度显著优于原三模型方案；原方案保留用于对照。
+以下以 YOLOE 路线为主介绍。位姿后端默认 TensorRT，需要与实物对应、尺度正确的 CAD mesh。
 
-- D455 深度对齐彩色、传感器尺度换算为米、RGB-D 一致的畸变校正。
-- 复用 WAPR/SAPR 修正和 WBPS 候选评分，默认 TensorRT。
-- 可选 GroundingDINO → SAM2 → DINOv2 CAD 模板检测初始化。
-- 实时 3D 框与坐标轴、逐帧 JSONL、原子更新的 `latest.json`、RGB-D 快照。
-- 输出 `4×4` 变换、`R`、米制平移、`xyzw` 四元数、时间戳和有效状态。
-- 单目标配置与机器人端读取示例，支持外部标定矩阵转换到基座坐标系。
+```mermaid
+flowchart TD
+    CAMERA["RealSense RGB-D<br/>对齐、深度尺度换算与畸变校正"]
+    REFERENCE["预先导出的 prompt_embeddings.npz"]
+    CAD["已知 CAD mesh"]
 
-默认 ROI 模式在目标丢失后按 `r` 重新框选；自动模式在启动和跟踪更新被拒绝后搜索目标，
-按 `r` 也会重新搜索。两种模式都需要实物对应的米制 mesh。
+    subgraph INITIALIZATION["自动初始化"]
+        DETECT["YOLOE 检测"] --> BBOX["mask 转紧致 bbox"]
+        BBOX --> INIT["WAPR 位姿初始化 + WBPS 评分"]
+    end
 
-## 快速运行
+    subgraph TRACKING["正常跟踪：每个新帧"]
+        PREDICT["Kalman 位姿预测"] --> REFINE["WAPR / SAPR 精修"]
+        REFINE --> SCORE{"位姿与评分合格？"}
+    end
 
-当前验证环境为 Linux、Python 3.10、RTX 4090 Laptop 和 RealSense D455。
-在仓库根目录执行：
+    subgraph RECOVERY["短暂失效恢复"]
+        HOLD["保留有效位姿与 Kalman 状态<br/>输出 valid=false"]
+        HOLD --> RELOCALIZE["Kalman 预测 + YOLOE 重定位<br/>bbox 与深度修正平移，再由 WAPR / SAPR 精修评分"]
+        RELOCALIZE --> CONFIRM{"连续精修结果合格？"}
+        CONFIRM -->|否| TIMEOUT{"恢复超时？"}
+        TIMEOUT -->|否，下一帧重试| RELOCALIZE
+    end
+
+    CAMERA --> DETECT
+    CAMERA -.-> REFINE
+    REFERENCE -.-> DETECT
+    CAD -.-> INIT
+    INIT -->|初始化成功| PREDICT
+    INIT -->|未找到有效位姿，继续搜索| DETECT
+    SCORE -->|是| OUTPUT["输出有效 6D 位姿<br/>更新跟踪状态"]
+    OUTPUT -->|下一帧| PREDICT
+    SCORE -->|否| HOLD
+    CONFIRM -->|是，恢复跟踪| OUTPUT
+    TIMEOUT -->|是| LOST["LOST：清空跟踪状态"]
+    LOST -->|重新初始化| DETECT
+```
+
+图示为 YOLOE 自动模式：正常跟踪不运行 YOLOE；恢复时保留预测旋转，利用检测框和深度修正平移。
+没有检测结果时继续使用 Kalman 初值，连续精修结果通过确认后才恢复有效位姿输出。
+
+[安装与启动](#安装与启动) · [初始化模式](#初始化模式) · [跟踪与恢复](#跟踪与恢复) · [位姿输出](#位姿输出) · [常用命令](#常用命令) · [TODO](#todo)
+
+## 安装与启动
+
+### 1. 准备环境和目标模型
+
+桌面环境已在 Linux、Python 3.10、RTX 4090 Laptop 和 RealSense D455 上运行。
+系统需提供 CUDA toolkit、C++ 编译器及 EGL/GL 开发头文件。在仓库根目录执行：
 
 ```bash
 uv sync
 source .venv/bin/activate
+uv pip install -r requirements-yoloe.txt
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
-python -m wapr_realsense --check-camera
-python -m wapr_realsense --config configs/box.yaml
 ```
 
-首次使用还需准备系统 CUDA toolkit、C++ 编译器及 EGL/GL 开发头文件，再执行：
+Jetson 请使用 `pyproject.toml` 中与平台匹配的依赖组。
+仓库包含 [box 示例模型](assets/meshes/box/)的 OBJ、MTL 和纹理，单位为米，可使用 [box.example.yaml](configs/box.example.yaml)。
+其他目标可从 [target.example.yaml](configs/target.example.yaml) 开始，设置 `mesh`、`mesh_unit` 和 `mesh_scale`。
+`.gitignore` 仅开放 `assets/meshes/box/`，其他本地 mesh、权重和引擎继续忽略。
+YOLOE 运行时只读取已导出的 `prompt_embeddings.npz`，创建方法见下文[YOLOE 参考图检测](#yoloe-参考图检测)。
+**配置内路径相对 YAML 文件解析，命令行显式参数优先。**
+
+### 2. 准备运行资源和 TensorRT 引擎
+
+首次运行或更换部署机器时执行；已有可用缓存可跳过资源准备和导出：
 
 ```bash
 python scripts/setup_runtime.py
-python -m wapr.export_engines
-```
-
-`uv sync` 安装 Python 依赖；以上步骤准备权重、渲染器与本机 TensorRT 引擎。已有可用缓存时直接运行即可。
-
-box 配置引用本地 `assets/meshes/box/textured_mesh_modified.obj`，单位为米。
-干净源码不包含这个模型；新机器上自行复制模型，或修改配置中的路径。
-**配置内路径相对配置文件解析，命令行显式参数优先。**
-
-使用对应的依赖组选择部署平台；普通 `uv sync` 默认选择 `common`。
-锁文件仅面向 Linux：`common` 为 x86_64 / Python 3.10+，Orin 为 ARM64 / Python 3.8，
-Thor 为 ARM64 / Python 3.12。三套环境在 `tool.uv.environments` 中分别声明，依赖和下载源也带有环境条件，避免 uv 同时解析全部组时，
-将某个平台的 GPU wheel 用于不兼容的系统或 Python 版本。
-
-```bash
-# Laptop: Python 3.10, Torch 2.7.1 / torchvision 0.22.1, CUDA 12.6
-uv sync --group common --python 3.10
-
-# Orin NX / JetPack 5.1.1: Python 3.8, verified NVIDIA GPU wheels
-uv sync --no-default-groups --group orin-nx-jetpack511 --python 3.8
-
-# AGX Thor: Python 3.12, PyTorch cu130 + ARM64 ONNX Runtime GPU 1.24.0
-uv sync --no-default-groups --group thor --python 3.12
-```
-
-`common` 保留原桌面的依赖版本和 TensorRT CUDA 12 包；Orin 组沿用
-`requirements-jetson.txt` 的版本约束，Torch 和 torchvision 自动从已验证的 wheel URL 安装。
-Thor 组从 cu130 索引安装 Torch/torchvision，并使用指定的 ONNX Runtime wheel。
-Jetson 两组均不通过 pip 安装 TensorRT，安装完成后链接系统包，且 Python ABI 必须一致：
-
-```bash
-# Orin / Python 3.8
-ln -s /usr/lib/python3.8/dist-packages/tensorrt* .venv/lib/python3.8/site-packages/
-# Thor / Python 3.12
-ln -s /usr/lib/python3.12/dist-packages/tensorrt* .venv/lib/python3.12/site-packages/
-source .venv/bin/activate
-python -c 'import torch, tensorrt; print(torch.__version__, torch.cuda.is_available(), tensorrt.__version__)'
-# Thor only
-python scripts/check_thor.py
-```
-
-不要将 Python 3.10 的 TensorRT 扩展链接进 Python 3.8/3.12 环境。系统 TensorRT
-需与 JetPack 匹配；当前代码支持 Orin 的 8.5 和 Thor 的 10.x，尚不支持 11.x。
-后续再次执行 `uv sync` 时仍需带上所选组参数。Thor 的检查脚本测试 CUDA 运算、NMS、
-TensorRT Builder 和禁止 CPU 回退的 ONNX Runtime 执行；Thor 的相机、渲染和位姿推理仍待实机验证。
-ONNX Runtime 不参与 WAPR 主位姿后端。自动检测模块的可选依赖仍需单独准备。
-
-```bash
-export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
+python -m wapr.export_engines --object-mode single
 python -m wapr_realsense --check-camera
-python scripts/setup_runtime.py
-WAPR_TRT_WORKSPACE_GB=4 python -m wapr.export_engines --object-mode single
-python -m wapr_realsense --config configs/box.yaml --web --web-host 0.0.0.0 --backend trt --object-mode single
 ```
 
-Jetson 系统或 Docker 仍需 CUDA 编译工具、C++ 编译器、NVIDIA EGL/GL 库和相机 USB 访问。
-引擎和渲染器在目标机器构建，不复制桌面的 `.engine` 或 `.so`。
+引擎在目标机器上构建，构建 workspace 默认 **4 GiB**。`single` 是单目标应用的默认容量。
 
-TRT 模式直接加载引擎，不额外加载 PyTorch 网络权重。位姿引擎串行提交推理，
-共用一块按最大需求分配的执行内存；权重和 context 的持久状态仍各自保留，无须重建已有引擎。
-先运行 `python scripts/check_trt_memory.py --run`，保留四个引擎并测试 12/6 候选的合成输入
-（不验证位姿精度），再用 `--backend trt` 启动应用。
-`WAPR_TRT_CONTEXT` 显示各引擎需求，`WAPR_TRT_MEMORY` 显示实际分配的共享缓冲大小。
-操作者在 Orin NX 16GB 上测得各自执行内存合计 13,460.52 MiB，共享缓冲为 4,266.14 MiB。
-合成输入出现非有限输出，TensorRT 数值正确性和位姿跟踪尚未通过验证。
-`WAPR_TRT_SHARED_MEMORY=0` 恢复各 context 单独分配，对比时可能再次耗尽内存。
+### 3. 启动界面
 
-使用 `--object-mode single|multi` 选择引擎容量，应用和导出均默认 `single`。
-当前配置下，单物体模式导出 `2/12/12` profile 和四个主引擎；多物体模式使用 `2/12/120`，
-并增加 `wbps_batch`。单物体跟踪直接使用 `wbps.engine`，不要求额外跟踪引擎。
-RealSense 界面仍跟踪一个目标，此选项选择引擎容量，不会将界面改成多目标跟踪。
-单物体运行也接受已有的 `2/12/120` 引擎。
+网页可视化，使用 YOLOE 自动初始化：
 
 ```bash
-export WAPR_TRT_WORKSPACE_GB=4
-python -m wapr.export_engines --object-mode single                     # 依次导出四个主引擎
-python -m wapr.export_engines --object-mode single --engine sapr       # 仅导出 SAPR
-python -m wapr.export_engines --object-mode multi --engine wbps_batch  # 仅导出多物体评分引擎
-python -m wapr.export_engines --object-mode multi                      # 完整多物体引擎集
-python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single
+python -m wapr_realsense --config configs/box.example.yaml --web --web-host 0.0.0.0
 ```
 
-每个引擎在独立进程中导出，进程退出后才开始下一个；构建 TensorRT 前释放 PyTorch 导出模型和输入张量。
-两个模式使用相同缓存路径，指定某个引擎只会替换对应文件。
-非有限输出先用同一模型、同一输入在两个独立进程中对比，无须重建：
+本机打开 `http://127.0.0.1:8000`，局域网打开 `http://<设备IP>:8000`，用 `--web-port` 修改端口。
+预热结束后点击 **Detect**；手动模式需先拖框。网页支持切换初始化模式，切换或再次点击 Detect 会重置当前跟踪。
+
+使用 OpenCV 窗口时去掉 `--web --web-host 0.0.0.0`；手动模式在冻结画面上框选后按 Enter/空格确认。
+`r` 重新初始化、`s` 保存快照、`q`/Esc 退出。
+## 初始化模式
+
+| 模式 | 配置 | 输入与用途 |
+| --- | --- | --- |
+| YOLOE | [box.example.yaml](configs/box.example.yaml) | 随仓库提供的 box mesh 和 NPZ；用于自动初始化和恢复定位 |
+| 手动 ROI | [box.yaml](configs/box.yaml) | 手动提供 bbox，不加载检测模型 |
+
+### YOLOE 参考图检测
+
+公开 box 示例已包含 [参考拼图与 NPZ](assets/references/box/)，可直接使用。
+创建自己的参考特征时，使用仓库内的 [camera_yoloe_fuse.py](examples/camera_yoloe_fuse.py)，无需切换到 Ultralytics 仓库：
 
 ```bash
-python scripts/check_trt_memory.py --run --models wapr_w_mask --memory shared
-python scripts/check_trt_memory.py --run --models wapr_w_mask --memory private
+python examples/camera_yoloe_fuse.py \
+  --camera 8 --model yoloe-26s-seg.pt \
+  --conf 0.05 --imgsz 640 --device 0 \
+  --output outputs/yoloe_reference
 ```
 
-诊断会打印每个 batch、每个输出的 NaN/Inf 数量，任何失败都会以非零状态退出。
-可加 `--input random` 对比随机合成输入；这些检查均不验证位姿精度。
+`--camera` 是 OpenCV 相机编号；采集工具需要本地桌面窗口。采集同一目标的不同角度：
 
-在冻结画面上紧贴目标拖出矩形框，Enter/空格确认。实时窗口中：
-`r` 重新初始化、`s` 保存 RGB-D 与结果、`q`/Esc 退出。
-默认采用本机已验证可取帧的 640×480、15 Hz；采集频率不代表位姿输出频率。
+| 按键 | 操作 |
+| --- | --- |
+| `S` | 冻结当前帧并框选目标，Enter/空格确认；可重复采集多个视角 |
+| `F` | 融合全部参考视角，编码并直接导出 NPZ，然后预览检测效果 |
+| `U` / `R` | 撤销上一视角 / 清空采集；修改后重新按 `F` 导出 |
+| `M` / `Q` | 切换 mask 预览 / 退出 |
 
-不使用配置文件，也可指定其他模型：
+输出包括：
+
+```text
+outputs/yoloe_reference/
+  prompt_embeddings.npz  # 跟踪运行所需的参考特征
+  reference_mosaic.png   # 参考视角拼图
+  boxes.xyxy.yaml        # 拼图中的框坐标
+  reference_boxes.jpg    # 框选可视化
+```
+
+一份 NPZ 对应一个目标类别，可融合多个视角。`F` 已完成参考图编码，运行时只加载 NPZ，
+不接受 image + bbox，也不重复编码参考图，从而减少启动准备工作；当前帧的检测推理仍正常执行。
+修改参考图或模型权重后重新导出，并在采集和运行时使用同一模型。
+
+将生成的 NPZ 用于跟踪：
 
 ```bash
-python -m wapr_realsense --mesh /absolute/path/model.obj --mesh-unit m --backend trt
+python -m wapr_realsense --config configs/box.example.yaml \
+  --yoloe-prompt-embeddings outputs/yoloe_reference/prompt_embeddings.npz \
+  --web --web-host 0.0.0.0
 ```
 
-ROI 模式无窗口运行需提供初始框，像素坐标对应校正后的彩色图像：
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --no-display --bbox 180 100 280 300
-```
-
-## 可选自动初始化
-
-```bash
-python -m wapr_realsense --config configs/box.auto.yaml
-# 也可以直接为已有目标配置开启自动模式，支持无窗口运行：
-python -m wapr_realsense --config configs/box.yaml --init auto --no-display
-```
-
-自动模式复用现有 WAPR 检测器：GroundingDINO 生成候选框，SAM2 分割，DINOv2 与当前
-mesh 的多视角渲染模板匹配，再由 WAPR 根据检测 mask 估计位姿；选择通过 `--min-score`
-的候选中 `score_6d` 最高者。这里使用 CAD 模板，不使用参考照片，也无法区分多个相同物体的
-物理身份。只在搜索阶段运行检测，成功后切回原有六候选跟踪。
-
-YAML 将检测选项集中到 `groundingdino_sam2_dinov2_detect` 下：
+更换目标还需修改配置中的 CAD mesh 和尺度。也可在 YAML 中设置路径（相对该 YAML 文件）：
 
 ```yaml
-groundingdino_sam2_dinov2_detect:
-  activate: true       # false 使用手动 ROI 初始化
-  use_sam2: false      # true 开启 SAM2；false 使用 bbox 输入
-  interval: 1.0
-  score: 0.1
-  backend: trt
-  dino: vitl14
-  grounding: swinb
-  template_cache: ../.wapr_runtime/templates/box_vitl14.pt
+yoloe_detection:
+  activate: true
+  model: yoloe-26s-seg.pt
+  prompt_embeddings: ../outputs/yoloe_reference/prompt_embeddings.npz
+  conf: 0.05
+  imgsz: 640
+  device: "0"
+  max_candidates: 3
 ```
 
-| 块内字段 | 默认值 | 含义 |
-| --- | --- | --- |
-| `activate` | `false` | 开启自动初始化及跟踪丢失后的重新检测 |
-| `use_sam2` | `true` | 是否使用 SAM2；`false` 时使用 bbox 区域匹配，并以 bbox 输入 WAPR |
-| `interval` | `1.0` | 一次搜索失败结束后，到下一次尝试的间隔秒数 |
-| `score` | `0.1` | 2D 模板匹配阈值，与顶层 `min_score` 分开 |
-| `backend` | `trt` | DINOv2 编码后端，也支持 `torch` |
-| `dino` | `vitl14` | 支持 `vits14`、`vitb14`、`vitl14` |
-| `grounding` | `swinb` | 支持 `swint`、`swinb` |
-| `template_cache` | 不设置 | 可选 `.pt` 模板缓存；不设置则每次启动在显存中构建 |
+已有参考拼图和 xyxy 框列表时，可用 [prepare_yoloe_reference.py](scripts/prepare_yoloe_reference.py) 离线导出 NPZ，参数见 `--help`。
+`box.example.yaml` 已开启自动模式；自定义配置可用 `--init auto` 开启，再由 `yoloe_detection.activate: true` 选择 YOLOE。
+`box.yoloe.yaml` 保留本地目标配置；公开示例使用 `box.example.yaml`。
 
-配置文件使用 `.yaml` 或 `.yml`，检测选项统一放在上述配置块内。命令行显式参数优先：
-`--init auto` / `--init roi` 覆盖 `activate`，
-`--detect-use-sam` / `--no-detect-use-sam` 覆盖 `use_sam2`。例如：
+YOLOE 将 mask 转为紧致 bbox，WAPR 走无 mask 路线。初始化最多尝试 `max_candidates` 个高置信度框，
+选择评分合格且 6D 评分最高的位姿；正常 tracking 不运行 YOLOE。恢复使用最高置信度且有有效深度的框，不维护检测实例 ID。
+加 `--init roi` 可手动初始化、仅在恢复时使用 YOLOE。WAPR 使用 TensorRT 时，YOLOE 仍使用 PyTorch。
+
+### 手动 ROI 初始化
 
 ```bash
-python -m wapr_realsense --config configs/box.auto.yaml --no-detect-use-sam
+python -m wapr_realsense --config configs/box.yaml --web --web-host 0.0.0.0
 ```
 
-关闭后跳过 SAM2 模型加载、推理和权重下载，仍运行 GroundingDINO 和 DINOv2。
-DINO 裁剪和重复候选抑制使用矩形区域；位姿估计收到的是不带 mask 的 `bbox_xywh`，走
-`wapr_wo_mask` 路径。背景可能更多地参与匹配和初始深度估计，需要重新检查分数与准确率；
-SAM2 计时显示 `skipped`。`--detect-use-sam` 可以覆盖配置并重新启用 SAM2。
+在冻结画面上拖框，再点击 Detect。不启用 YOLOE 时，这条路线无需检测模型和参考图；
+不带配置启动也默认采用手动 ROI。
 
-首次使用会按现有机制准备可选检测依赖、下载缺失权重；仅位姿环境准备脚本不会预加载它们。
-DINO TensorRT 后端按需构建引擎，GroundingDINO 和 SAM2 保持 FP32，启动耗时和显存占用会增加。
-环境不兼容时由现有依赖准备机制报错。示例模板缓存相对配置文件解析，位于
-`.wapr_runtime/templates/`，不在 `.wapr_runtime/cache/` 内。mesh/纹理、编码器或源码变化
-使缓存失效时，应用自动选择同目录下带版本标识的新路径，首次重建、后续复用，并保留旧文件。
-`DET2D_CAD_CACHE_CHANGED` 会打印实际路径，不需要删除目录。设置 `template_cache: null`
-可以关闭模板磁盘缓存。
+原 WAPR 的三模型检测仅作对照：`python -m wapr_realsense --config configs/box.auto.yaml --web`。
 
-搜索期间输出 `searching`、`valid=false`，成功后输出 `initialized_auto`，随后为 `tracking`。
-跟踪更新被拒绝时输出 `lost` 和空位姿，下一帧重新搜索。高分漂移仍可能漏检，重新搜索也不保证
-找回同一个物理实例。
-首次调用包含三次检测预热及位姿预热，评估恢复延迟应查看后续搜索。
-搜索在主线程同步执行，期间暂停位姿输出。
+## 跟踪与恢复
 
-终端按三种颜色显示计时，单位均为毫秒：
-
-- **黄色 `[WARMUP]`**：首次检测预热后，汇总 GroundingDINO、SAM2、DINOv2 各自的总耗时、
-  平均耗时和调用次数；首次有效候选批次再打印 WAPR 位姿初始化的预热总耗时和平均耗时。
-- **绿色 `[TRACKING]`**：默认每 5 秒打印一次该区间的 WAPR 平均耗时和跟踪帧数，
-  丢失、重新初始化或退出时补打剩余统计。仅统计跟踪更新，包括被拒绝的更新；首次调用开销也计入平均值。
-  可用 `--timing-interval 2` 调整汇总间隔。
-- **青色 `[INIT]` / `[REINIT]`**：首次搜索及后续搜索在开始时提示，结束时汇总 GroundingDINO、
-  SAM2、DINOv2、WAPR 位姿初始化耗时，并显示检测总耗时、完整初始化总耗时、候选数和搜索结果。
-  首次完整初始化总耗时包含预热；后续搜索复用已完成的预热。未运行的模块显示 `skipped`。
-
-GroundingDINO 包含图像预处理、推理及框过滤；SAM2 包含分割及 mask 后处理；DINOv2
-包含候选裁剪预处理和所有批次编码，不含模板匹配。检测总耗时还包含匹配和后处理。
-WAPR tracking 包含完整跟踪更新和有效性检查；WAPR 位姿初始化会处理所有有效候选，最后才选择目标。
-计时前后同步 CUDA，测量包含 CPU 工作和 GPU 等待的阶段墙钟耗时；额外同步会影响阶段重叠。
-终端自动启用颜色，重定向日志或设置 `NO_COLOR=1` 时输出纯文本。
-
-加上 `--profile-tracking`，复用现有计时器查看跟踪分段耗时：
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
-  --web-host 0.0.0.0 --web-port 8000 --profile-tracking --timing-interval 5
-```
-
-每个统计窗口增加 WAPR、SAPR、WBPS 的每帧平均耗时，以及各自的 `crop`（渲染和裁剪预处理）
-和 `network`（包含缓冲设置的网络前向调用）。多次迭代的耗时按帧累加；`other` 为总耗时减去
-三个阶段总耗时。crop/network 已包含在对应阶段内，不应重复相加。网页复用同一份汇总。
-分段计时默认关闭，额外 CUDA 同步会改变延迟；评估正常跟踪性能时去掉此开关。
-初始化和预热不混入跟踪分段统计。
-
-裁剪路径为 RGB、XYZ 和可选 mask 复用一份透视采样网格，省去未使用的观测深度裁剪；
-直接使用渲染器约定的 0–1 RGB 输出，避免读取 GPU 标量判断颜色范围。
-已在 CPU 上与独立 Kornia 变换对照，覆盖有/无 mask 和 batch 1/2/3/6/12；
-Jetson 延迟和位姿精度仍需实机对比。这些预处理优化复用已有 engine。
-
-使用 `--tracking-preset` 选择跟踪负载，初始化继续使用原有 recipe：
-
-| 预设 | WAPR迭代 | SAPR迭代 | WBPS候选 | 每帧网络调用 |
-| --- | ---: | ---: | ---: | ---: |
-| `full`（默认） | 3 | 2 | 6 | 6 |
-| `balanced` | 2 | 1 | 3 | 4 |
-| `fast` | 1 | 1 | 3 | 3 |
-| `small-motion` | 0 | 1 | 2 | 2 |
-
-`full` 沿用当前 recipe 的迭代次数，默认3/2；仅在 center 与上一帧位姿完全相同时复用分支。
-普通单目标路径的 WAPR 裁剪行数从2降到1、SAPR 从3降到2、评分裁剪从6降到4；
-WBPS 前向仍接收原来的六个候选、顺序和重复次数。用 `full --no-reuse-tracking`
-对照原负载。center 与上一帧位姿不同时保留独立分支，不跨物体身份复用。
-
-`balanced`/`fast` 评分上一帧、WAPR(center)、SAPR(WAPR(center))；`small-motion`
-评分上一帧和 SAPR(center)。center 默认等于上一帧位姿。减少候选会改变评分和恢复能力，
-需要实测漂移、丢失率并重新评估评分阈值。现有单物体引擎支持这些候选组；修正 batch=1
-仍会补到引擎最小 batch（当前为2），本次未增加真正的 batch=1 引擎导出。
-多物体使用减少候选的预设时，需要 `wbps_batch.engine`，不能使用固定六候选的跟踪评分引擎。
-预设和复用开关写入 `session.json`，预热也使用所选预设。
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
-  --web-host 0.0.0.0 --web-port 8000 --tracking-preset balanced --profile-tracking
-```
-
-也可以在 YAML 中设置 `tracking_preset: balanced`，命令行参数优先。
-CPU 回归测试覆盖候选重复次数、裁剪行数和预设传递。
-
-### Kalman 运动预测
-
-目标 YAML 示例默认开启匀速位姿预测，支持所有跟踪预设和 Web 界面。预测结果作为 WAPR
-跟踪初值，对外仍输出通过评分的 WAPR 位姿。无配置启动时默认关闭，可用 `--kalman` 或
-`--no-kalman` 覆盖配置。
+正常跟踪由 **Kalman 预测 → WAPR/SAPR 精修 → WBPS 评分**组成。
+Kalman 为搜索提供初值，对外仍输出通过检查的 WAPR 位姿；它不直接消除模型误差或 TRT 数值漂移。
 
 ```yaml
 kalman_motion_prediction:
   activate: true
-  translation_measurement_std_m: 0.01
-  rotation_measurement_std_rad: 0.05
-  translation_acceleration_std_m_s2: 1.0
-  rotation_acceleration_std_rad_s2: 3.0
   max_dt_s: 0.5
-```
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --kalman
-# 使用相同跟踪预设和输入对比：
-python -m wapr_realsense --config configs/box.yaml --no-kalman
-```
-
-观测标准差控制通过评分的 WAPR 位姿对滤波器的修正强度，数值越大越信任运动预测。
-加速度标准差控制速度变化的灵活度，数值越大适应变化越快。这些默认值是起始参数，
-不是标定得到的传感器不确定度；数值参数均须有限且大于零。
-滤波器使用相机时间戳的实际间隔，时间戳不可用时使用主机接收时间；状态包含平移、
-旋转误差、线速度和角速度共 12 维，旋转通过 SO(3) 增量更新。
-时间戳重复、倒退、时钟域变化或间隔超过 `max_dt_s` 时丢弃旧速度；初始化、重置和
-跟踪丢失也会重新建立滤波状态。预测深度非正时退回最近可靠位姿。
-可通过下述恢复窗口控制失效后的重试；运动预测本身不提供遮挡恢复。
-
-设计参考 [FoundationPose++ 的 Kalman 运动预测](https://github.com/teal024/FoundationPose-plus-plus/blob/master/src/utils/kalman_filter_6d.py)，
-使用传感器时间间隔及旋转误差替代固定步长和欧拉角。配置记录在 `session.json`。
-CPU 测试覆盖合成运动预测和跟踪状态传递；真实 RGB-D 跟踪收益及 Jetson 开销仍需实测。
-
-### 短暂失效恢复
-
-目标示例配置默认开启有限时间的恢复窗口：
-
-```yaml
 tracking_recovery:
   activate: true
-  timeout_s: 1.0
+  timeout_s: 5.0
   confirm_frames: 2
 ```
 
-已建立的跟踪失效后进入 `recovering`，保留最近接受的位姿和 Kalman 状态，在后续新帧继续精修。
-期间输出 `valid=false` 和空位姿，预览不绘制预测框；拒绝结果不更新滤波器。
-连续两个不同采集帧的 WAPR/SAPR 精修结果通过原有评分及位姿检查后恢复跟踪。
-未经精修的 previous/center 候选不能确认恢复，也不更新 Kalman。
-累计预测从最近一次可靠精修观测起最多持续 `kalman_motion_prediction.max_dt_s`（默认0.5秒），
-随后保持该预测终点继续精修；时间戳异常或预测无效时丢弃旧速度。
-关闭 Kalman 时仍可恢复，直接使用最近接受的位姿重试。
+跟踪评分不合格后进入 `recovering`，保留最近有效位姿和 Kalman 状态，在新帧上继续精修。
+启用 YOLOE 时，检测框与深度提供新的平移候选，保留预测旋转；检测失败时继续用 Kalman 初值。
+连续 `confirm_frames` 个不同采集帧的精修结果通过检查才恢复跟踪，拒绝结果不更新滤波器。
+累计预测最多外推 `max_dt_s`，随后保持预测终点继续尝试；恢复窗口不会因失败而延长。
 
-窗口从第一次失效开始，不因后续失败延长。默认1秒后清空状态，手动模式等待重新框选，
-自动模式重新搜索。首次初始化失败不进入恢复；重置、Detect 和模式切换也会清空恢复状态。
-Web 显示 `RECOVERING` 并继续推理；终端 `[RECOVERY]` 记录进入、成功及超时事件。
-恢复尝试计入跟踪耗时，配置写入 `session.json`。无配置启动默认关闭，可用
-`--tracking-recovery` / `--no-tracking-recovery` 覆盖开关，通过 `--recovery-timeout-s`
-和 `--recovery-confirm-frames` 调整参数。本功能没有增加视觉跟踪器或遮挡模型；
-CPU 状态机测试不代表真实恢复效果或 Jetson 性能已验证。
+恢复期间输出 `valid=false` 和空位姿。超时后清空状态：自动模式重新搜索，手动模式等待新框选。
+上例为 5 秒窗口；各配置的实际值以 YAML 为准。无配置运行时，Kalman 和恢复默认关闭。
+可用 `--no-kalman`、`--no-tracking-recovery` 做对比。
 
-### Jetson 跟踪实测
+目前 bbox 深度可能混入背景，大幅旋转、长期遮挡和多个相似物体仍可能导致失败或目标切换。
+YOLOE 已验证参考特征加载与 CPU 检测，实时遮挡恢复成功率和 Jetson 上的 YOLOE 性能仍需实测。
 
-Orin NX 16GB 实机日志：JetPack 5.1.1 / CUDA 11.4、TensorRT 8.5.2.2、
-torch 2.1.0a0+41361538.nv23.06，使用 MAXN 并开启 `jetson_clocks`。
-输入为 RealSense D435I，640×480、15 Hz；使用 box mesh、手动 ROI 初始化、TensorRT 引擎、
-共享执行内存和 Web 界面。开启 `--profile-tracking --timing-interval 5`，统计不包含启动、预热和初始化。
+## 位姿输出
 
-| 跟踪预设 | 平均更新耗时（约） | 日志窗口均值范围 | 相比 full 减少耗时 |
-| --- | ---: | ---: | ---: |
-| `full` | 187 ms | 186.55–188.59 ms | — |
-| `balanced` | 120 ms | 119.00–120.76 ms | 36% |
-| `fast` | 94 ms | 93.44–94.47 ms | 50% |
-| `small-motion` | 58 ms | 57.40–59.42 ms | 69% |
+输出目录由 `output` 指定，包含：
 
-范围包含丢失、重新初始化或退出时补打的不完整窗口，表示日志中平均值的范围，不是逐帧延迟分位数。
-各模式来自不同的实时运行和手动框选，并非同一段数据的受控回放对比。
-分段计时的 CUDA 同步会增加开销；上述耗时不包含等待相机、写入位姿文件、网页编码及网络/显示延迟。
-约58 ms的处理能力已超过15 Hz相机输入频率，实际位姿输出仍受采集和其他处理开销限制。
-
-操作者观察到 `balanced`、`fast`、`small-motion` 的投影包围框精度略差，但暂时可以接受。
-目前尚未量化位姿精度、漂移和丢失率，FP16 数值等价性也未验证；`full` 继续作为默认和参考模式。
-后续可用同一段录制 RGB-D 回放，进行受控的精度与延迟对比。
-
-## 网页 Demo
+| 文件 | 内容 |
+| --- | --- |
+| `latest.json` | 原子更新的最新结果，供机器人端读取 |
+| `poses.jsonl` | 每帧完整结果 |
+| `camera.json` / `session.json` | 相机参数和本次运行配置 |
 
 ```bash
-python -m wapr_realsense --config configs/box.auto.yaml --web
-# 默认手动框选，不加载自动检测模型：
-python -m wapr_realsense --config configs/box.yaml --web
-# Jetson 局域网访问：
-python -m wapr_realsense --config configs/box.auto.yaml --web --web-host 0.0.0.0
+python examples/read_pose.py --input outputs/box_example/latest.json
 ```
 
-本机打开 `http://127.0.0.1:8000`，局域网打开 `http://<jetson-ip>:8000`。
-页面左侧显示彩色画面、3D 框与坐标轴；右侧包含状态、手动初始化开关、Detect 和日志式耗时摘要。
-静态资源随 Python 包提供，不需要 Node、外部 CDN 或桌面显示环境。
-
-- **WARMUP**：加载模型并预热，画面留空、按钮禁用；预热输出全部丢弃。
-- **INITIALIZED**：准备完成，显示相机画面，等待点击 **Detect**。
-- **Looking for object**：首次检测或目标丢失后的自动重搜；搜索期间 Detect 禁用。
-- **TRACKING**：已找到目标，显示位姿叠加；可再次点击 Detect 发起新搜索。
-
-开关初始值遵循配置的初始化模式，也可在网页切换。开启手动初始化后，画面冻结供拖动框选，
-画好框再点击 Detect；“重新框选”会取得新的冻结帧。框选坐标映射回原图像素，并绑定这份
-RGB-D，不会用到后续帧。跟踪成功后恢复实时画面。
-**手动模式丢失目标后提示“目标丢失，请重新手动框选”，清除旧框并等待用户重新框选，
-不会自动重搜或复用旧框。** 关闭开关时保留自动搜索与丢失后自动恢复。
-预热和搜索期间开关禁用；从手动切到自动且尚未加载检测模型时，重新显示 WARMUP，
-加载和预热结束后等待 Detect。模式切换会清除旧跟踪。
-
-右侧复用终端 `[WARMUP]`、最近一次 `[INIT]` / `[REINIT]` 和 `[TRACKING]`
-汇总内容；tracking 仍按 `--timing-interval` 输出区间平均耗时与帧数。
-预热完成后默认折叠 WARMUP，仍可展开查看。无候选时未运行的 SAM2 / DINOv2 显示
-`skipped`；位姿和 tracking 使用单实例代表负载预热，真实候选批量变化仍可能产生额外首次开销。
-自动搜索期间画面保持在搜索输入帧，HTTP 状态接口仍可响应。
-断开网页连接会禁用按钮并隐藏旧画面；重新连接后恢复当前会话。
-
-无需相机或 CUDA 即可检查页面交互，画面及耗时明确标为模拟数据：
-
-```bash
-python -m wapr_realsense --web-demo
-```
-
-模拟模式约 2 秒完成预热，默认支持手动框选，也可关闭开关体验自动模式；点击 Detect 后约 2 秒
-找到目标，tracking 约 12 秒后模拟丢失，按当前模式等待重新框选或自动重搜。
-真实模式仍使用原来的位姿文件输出约定，逐帧附带 `initialization_mode`；本次没有验证 Jetson 实机推理。
-
-## 输出与机器人接入
-
-box 配置默认保存到 `outputs/box/`，包括 `latest.json`、`poses.jsonl`、
-`camera.json`、`session.json`。完整 JSON 逐帧保存到文件；终端默认显示简洁计时，
-加 `--log-poses` 后每十个处理帧额外打印 `POSE_JSON`，再加 `--print-every 1` 可打印每帧。
-
-```bash
-python examples/read_pose.py --input outputs/box/latest.json
-```
-
-位姿表示原始 mesh 坐标系（单位换算和额外缩放后）到彩色相机光学坐标系：
+读取示例检查 `valid` 和时效性，默认拒绝超过 500 ms 的结果。位姿包含 `4×4` 变换、`R`、米制平移和 `xyzw` 四元数：
 
 ```text
 p_camera = R @ p_mesh + t_m
 T_base_object = T_base_camera @ T_camera_object
 ```
 
-相机 X 向右、Y 向下、Z 向前，平移为米。转换到机器人基座需要实测相机标定，
-读取示例会检查 `valid` 与数据新鲜度；默认拒绝超过 500 ms 的数据，可用 `--max-age-ms` 调整。
-WBPS 分数不是成功概率；遮挡、对称外观、缺失深度与 mesh 尺度误差可能导致漂移或错误位姿。
+mesh 坐标系为原始模型经单位换算和缩放后的坐标系；相机 X 向右、Y 向下、Z 向前。
+基座转换需提供实测标定，参考 [camera_to_base.example.yaml](configs/camera_to_base.example.yaml) 和读取脚本的 `--camera-to-base` 参数。
+WBPS 分数用于候选排序，不是成功概率。
 
-## 项目结构
+## 常用命令
 
-```text
-wapr_realsense/  相机适配、跟踪会话、CLI、几何与输出接口
-wapr/            WAPR 推理核心、可选检测/SAM 模块及原作者声明
-configs/         单物体与相机到基座的配置模板
-examples/        机器人端位姿读取示例
-scripts/         位姿运行环境准备
-tests/           CPU 接口测试和可选 SDK 几何测试
-assets/meshes/   本地模型，默认不进入 Git
+查看全部命令行选项：`python -m wapr_realsense --help`。运行 CPU 回归测试：
+
+```bash
+python -B -m unittest discover -s tests -v
 ```
 
-环境、缓存、权重、引擎和本地 mesh 默认由 `.gitignore` 排除。
-自动检测和 SAM 模块用于可选自动模式；ROI 模式不会加载这些模块。
+无需相机或 CUDA 检查网页交互：`python -m wapr_realsense --web-demo`，页面使用模拟数据。
 
-## 验证范围
+## TODO
 
-- 桌面已执行 D455 640×480/15 Hz 采集、TensorRT 初始化与跟踪调用。
-- 整理前，操作者已反馈当前 box 的实拍框选跟踪效果良好。
-- CPU 测试覆盖深度、畸变映射、配置、丢失状态与机器人输出约定。
-- 自动模式已用模拟推理测试验证 CLI/回放接入、重试间隔、候选选择和丢失后重初始化；
-  真实三模型检测、启动显存与实拍自动初始化效果尚未验证。
-- JetPack 5.1.1 上已验证基础 GPU 运算、D435I 取帧、渲染器编译和初始化；完整位姿链路尚未验证。
-- 本次保留原来的网络、候选数量、引擎 profile 和模型加载方式；尚未实施单目标显存优化。
-
-运行测试：`python -B -m unittest discover -s tests -v`。
+- [ ] **YOLOE TensorRT 加速评估**：判断是否需要导出 TensorRT，对比 PyTorch / TensorRT 的延迟、显存和检测精度。
+- [ ] **Jetson 实机 FPS 测试**：在 Orin NX 和 AGX Thor 上测量检测、初始化、跟踪及端到端 FPS / 延迟，记录分辨率、模型和功耗模式。
+- [ ] **3D mesh 建模流程**：整理从多视角采集、重建、网格清理、纹理生成到尺度校准、坐标系设置和导出验证的完整方法。
+- [ ] **模块消融实验**：对比检测路线、Kalman、短暂恢复、跟踪预设和推理后端，评估速度、位姿误差、漂移、丢失率及恢复成功率。
+- [ ] **FoundationPose 对比**：使用相同硬件、RGB-D 序列、mesh 和初始化条件，对比位姿精度、运行速度、资源占用及遮挡后的恢复能力。
 
 ## 来源与许可
 
-本项目是基于 WAPR 的应用改编，并非原作者的官方发行版。
-推理核心源自 WAPR commit `f165cec8ebdd48ae6f46d06a46c40d796ab80b71`；
-本项目增加 RealSense 输入和实时位姿接口，并保留上游后端模块。
-代码保留 [LGPL-2.1-only](LICENSE)，模型权重适用独立的
-[权重许可](WEIGHTS_LICENSE.txt)。保留[作者声明](AUTHORS.md)、
-[第三方声明](THIRD_PARTY_NOTICES.txt)和随附许可文件。
+本项目是 WAPR 的应用改编，并非上游官方发行版。推理核心源自 commit
+`f165cec8ebdd48ae6f46d06a46c40d796ab80b71`，保留上游后端模块。
+Kalman 设计参考 [FoundationPose++](https://github.com/teal024/FoundationPose-plus-plus)。
+代码保留 [LGPL-2.1-only](LICENSE)，模型权重适用独立[许可](WEIGHTS_LICENSE.txt)。
+保留[作者声明](AUTHORS.md)、[第三方声明](THIRD_PARTY_NOTICES.txt)和随附许可文件。

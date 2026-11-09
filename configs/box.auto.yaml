@@ -34,3 +34,7 @@ camera_frame: color_optical_frame
 object_frame: box
 print_every: 10
 output: ../outputs/box_auto
+
+# Enable with pre-encoded YOLOE prompt embeddings (.npz).
+yoloe_detection:
+  activate: false

@@ -20,7 +20,7 @@ class PoseSession:
 
     def __init__(self, estimator, mesh, diameter_m, minimum_score=0.5, track_function=None,
                  initializer=None, detect_interval=1.0, tracking_preset="full", reuse_tracking=True,
-                 kalman_settings=None, recovery_settings=None):
+                 kalman_settings=None, recovery_settings=None, recovery_detector=None):
         tracking_settings(tracking_preset)
         if not np.isfinite(detect_interval) or detect_interval <= 0:
             raise ValueError("detect_interval must be finite and positive")
@@ -38,6 +38,7 @@ class PoseSession:
         self.motion = PoseKalman(kalman_settings) if kalman_settings and kalman_settings.activate else None
         self.clock_domain = None
         self.recovery = recovery_settings or RecoverySettings()
+        self.recovery_detector = recovery_detector
         self.recovery_started = None
         self.recovery_hits = 0
         self.recovery_frame = None
@@ -114,10 +115,14 @@ class PoseSession:
                     self.motion.initiate(self.pose, timestamp)
                     prior = self.pose
                 self.clock_domain = domain
-            rows = self.track_function(self.estimator, frame.rgb, frame.depth_m, frame.K, [{
-                "track_id": 1, "obj_id": 1, "mesh": self.mesh,
-                "diameter_m": self.diameter, "pose_4x4": prior,
-            }])
+            center_pose = None
+            if self.recovery_started is not None and self.recovery_detector is not None:
+                center_pose = self.recovery_detector.recovery_pose(frame, prior, self.mesh)
+            instance = {"track_id": 1, "obj_id": 1, "mesh": self.mesh,
+                        "diameter_m": self.diameter, "pose_4x4": prior}
+            if center_pose is not None:
+                instance["center_pose_4x4"] = center_pose
+            rows = self.track_function(self.estimator, frame.rgb, frame.depth_m, frame.K, [instance])
             row = rows[0] if rows else None
             status = "tracking"
             current = time.monotonic() if now is None else now

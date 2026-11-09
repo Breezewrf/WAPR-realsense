@@ -1,0 +1,30 @@
+# Bundled box mesh and pre-encoded YOLOE references.
+mesh: ../assets/meshes/box/textured_mesh_modified.obj
+mesh_unit: m
+mesh_scale: 1.0
+backend: trt
+tracking_recovery:
+  activate: true
+  timeout_s: 5.0
+  confirm_frames: 2
+kalman_motion_prediction:
+  activate: true
+  max_dt_s: 0.5
+groundingdino_sam2_dinov2_detect:
+  activate: true
+  use_sam2: false
+yoloe_detection:
+  activate: true
+  model: yoloe-26s-seg.pt
+  prompt_embeddings: ../assets/references/box/prompt_embeddings.npz
+  conf: 0.05
+  imgsz: 640
+  device: "0"
+  max_candidates: 3
+width: 640
+height: 480
+fps: 15
+min_score: 0.5
+camera_frame: color_optical_frame
+object_frame: box
+output: ../outputs/box_example

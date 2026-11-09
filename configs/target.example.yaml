@@ -19,3 +19,7 @@ min_score: 0.5
 camera_frame: color_optical_frame
 object_frame: target_object
 output: ../outputs/target
+
+# Enable with pre-encoded YOLOE prompt embeddings (.npz).
+yoloe_detection:
+  activate: false

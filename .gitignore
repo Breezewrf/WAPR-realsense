@@ -24,9 +24,11 @@ cache/
 *.pyd
 *.log
 
-# Each operator supplies their own object mesh; preserve the usage note.
+# Bundle the box example; keep other operator meshes local.
 /assets/meshes/**
 !/assets/meshes/README.md
+!/assets/meshes/box/
+!/assets/meshes/box/**
 
 .DS_Store
 .env

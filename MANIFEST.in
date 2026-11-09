@@ -1,5 +1,9 @@
 include LICENSE AUTHORS.md WEIGHTS_LICENSE.txt THIRD_PARTY_NOTICES.txt
-include README.md README.zh-CN.md
+include README.md README.zh-CN.md requirements-yoloe.txt
+include scripts/prepare_yoloe_reference.py
+include examples/camera_yoloe_fuse.py
+recursive-include assets/meshes/box *
+recursive-include assets/references/box *
 recursive-include wapr/ogl_native *.cpp *.h *.cu *.cuh *.vert *.frag CMakeLists.txt LICENSE*
 recursive-include wapr/fonts *
 recursive-include wapr/weight_license *

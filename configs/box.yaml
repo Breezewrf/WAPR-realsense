@@ -5,7 +5,7 @@ backend: trt
 
 tracking_recovery:
   activate: true
-  timeout_s: 1.0
+  timeout_s: 5.0
   confirm_frames: 2
 
 kalman_motion_prediction:
@@ -28,3 +28,7 @@ camera_frame: color_optical_frame
 object_frame: box
 print_every: 10
 output: ../outputs/box
+
+# Enable with pre-encoded YOLOE prompt embeddings (.npz).
+yoloe_detection:
+  activate: false

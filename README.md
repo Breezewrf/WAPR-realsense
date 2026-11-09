@@ -2,504 +2,267 @@
 
 [中文](README.zh-CN.md)
 
-RealSense RGB-D → one object's 6D pose, powered by [WAPR](https://github.com/WangYuLin-SEU/WAPR).
-Initialize by manual selection or optional automatic detection, then track and publish its pose in the color-camera frame.
-The application targets robotics workflows with one known metric mesh and one object instance.
+RealSense RGB-D single-object 6D pose tracking based on [WAPR](https://github.com/WangYuLin-SEU/WAPR).
+This project **replaces WAPR's original GroundingDINO + SAM2 + DINOv2 detector with YOLOE reference-image detection**
+and adds Kalman prediction and bounded recovery for initialization, tracking and relocalization.
+Local usage reports show substantially faster detection and initialization with YOLOE; the original pipeline is retained for comparison.
+This guide focuses on the YOLOE workflow. The pose backend defaults to TensorRT and needs a matching, correctly scaled CAD mesh.
 
-- RealSense D455 depth-to-color alignment, sensor-derived meter scale and pinhole rectification.
-- Manual ROI or optional GroundingDINO → SAM2 → DINOv2 CAD-template initialization.
-- TensorRT by default; ROI mode does not load detection models.
-- Live 3D box/axes, atomic `latest.json`, per-frame JSONL and RGB-D snapshots.
-- Configurable frame names, `R`, translation in meters and quaternion in `xyzw` order.
+```mermaid
+flowchart TD
+    CAMERA["RealSense RGB-D<br/>Alignment, depth scaling and rectification"]
+    REFERENCE["Pre-exported prompt_embeddings.npz"]
+    CAD["Known CAD mesh"]
 
-ROI mode requires selection again after loss (`r`). Auto mode searches at startup and after a rejected
-tracking update; `r` restarts the search. A matching metric mesh is required in both modes.
+    subgraph INITIALIZATION["Automatic initialization"]
+        DETECT["YOLOE detection"] --> BBOX["Masks to tight bounding boxes"]
+        BBOX --> INIT["WAPR pose initialization + WBPS scoring"]
+    end
 
-## Quick start
+    subgraph TRACKING["Normal tracking: each new frame"]
+        PREDICT["Kalman pose prediction"] --> REFINE["WAPR / SAPR refinement"]
+        REFINE --> SCORE{"Valid pose and accepted score?"}
+    end
 
-The exercised setup is Linux, Python 3.10, an RTX 4090 Laptop GPU and a RealSense D455.
-From the repository root:
+    subgraph RECOVERY["Short-failure recovery"]
+        HOLD["Retain accepted pose and Kalman state<br/>Output valid=false"]
+        HOLD --> RELOCALIZE["Kalman prediction + YOLOE relocalization<br/>Bbox and depth recenter translation; WAPR / SAPR refine and score"]
+        RELOCALIZE --> CONFIRM{"Consecutive accepted refinements?"}
+        CONFIRM -->|No| TIMEOUT{"Recovery timed out?"}
+        TIMEOUT -->|No, retry on next frame| RELOCALIZE
+    end
+
+    CAMERA --> DETECT
+    CAMERA -.-> REFINE
+    REFERENCE -.-> DETECT
+    CAD -.-> INIT
+    INIT -->|Initialized| PREDICT
+    INIT -->|No accepted pose, continue searching| DETECT
+    SCORE -->|Yes| OUTPUT["Output valid 6D pose<br/>Update tracking state"]
+    OUTPUT -->|Next frame| PREDICT
+    SCORE -->|No| HOLD
+    CONFIRM -->|Yes, resume tracking| OUTPUT
+    TIMEOUT -->|Yes| LOST["LOST: clear tracking state"]
+    LOST -->|Reinitialize| DETECT
+```
+
+The diagram shows YOLOE automatic mode. Normal tracking does not run YOLOE. Recovery preserves predicted rotation
+and uses a detection box and depth to recenter translation. Without a detection, it retains the Kalman seed;
+valid pose output resumes only after consecutive accepted refinements confirm recovery.
+
+[Setup](#setup) · [Initialization modes](#initialization-modes) · [Tracking and recovery](#tracking-and-recovery) · [Pose output](#pose-output) · [Useful commands](#useful-commands) · [TODO](#todo)
+
+## Setup
+
+### 1. Prepare the environment and object model
+
+The desktop workflow has run on Linux, Python 3.10, an RTX 4090 Laptop GPU and a RealSense D455.
+The system needs a CUDA toolkit, C++ compiler and EGL/GL development headers. From the repository root:
 
 ```bash
 uv sync
 source .venv/bin/activate
+uv pip install -r requirements-yoloe.txt
 export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
-python -m wapr_realsense --check-camera
-python -m wapr_realsense --config configs/box.yaml
 ```
 
-On first use, prepare the system CUDA toolkit, C++ compiler and EGL/GL development headers, then run:
+For Jetson, select the matching platform dependency group in `pyproject.toml`.
+The repository includes the [box example mesh](assets/meshes/box/) with its OBJ, MTL and texture in meters;
+use [box.example.yaml](configs/box.example.yaml). For other targets, start from [target.example.yaml](configs/target.example.yaml)
+and set `mesh`, `mesh_unit` and `mesh_scale`. Only `assets/meshes/box/` is allowed through `.gitignore`;
+other local meshes, weights and engines remain ignored. YOLOE only loads pre-exported `prompt_embeddings.npz` at runtime;
+see [YOLOE reference-image detection](#yoloe-reference-image-detection) to create it.
+**Config paths resolve relative to the YAML file; explicit CLI arguments take precedence.**
+
+### 2. Prepare runtime assets and TensorRT engines
+
+Run on first use or when deploying to another machine. Skip asset preparation and export if the cache is ready:
 
 ```bash
 python scripts/setup_runtime.py
-python -m wapr.export_engines
-```
-
-`uv sync` installs Python dependencies; these steps prepare weights, the renderer and local TensorRT engines.
-With a working cache, run the application directly.
-
-`configs/box.yaml` references the operator's local mesh at
-`assets/meshes/box/textured_mesh_modified.obj`. Supply your mesh at that path or edit
-the configuration; source exports do not bundle it. Paths inside a config are relative to that file.
-Explicit CLI arguments override config values.
-
-Select the deployment group for your platform. Plain `uv sync` defaults to `common`.
-The lock targets Linux only: x86_64 / Python 3.10+ for `common`, ARM64 / Python 3.8
-for Orin, and ARM64 / Python 3.12 for Thor. Each target is a separate `tool.uv.environments` entry. Dependency and source markers
-keep GPU wheels out of incompatible environments while uv resolves all groups for the lockfile.
-
-```bash
-# Laptop: Python 3.10, Torch 2.7.1 / torchvision 0.22.1, CUDA 12.6
-uv sync --group common --python 3.10
-
-# Orin NX / JetPack 5.1.1: Python 3.8, verified NVIDIA GPU wheels
-uv sync --no-default-groups --group orin-nx-jetpack511 --python 3.8
-
-# AGX Thor: Python 3.12, PyTorch cu130 + ARM64 ONNX Runtime GPU 1.24.0
-uv sync --no-default-groups --group thor --python 3.12
-```
-
-`common` retains the desktop versions and TensorRT CUDA 12 packages. The Orin group
-uses the constraints from `requirements-jetson.txt` and installs its verified Torch and
-torchvision wheels automatically. Thor uses the cu130 PyTorch index and the supplied
-ONNX Runtime GPU wheel. Neither Jetson group installs TensorRT via pip. Link the system
-package after syncing, with matching Python ABIs:
-
-```bash
-# Orin / Python 3.8
-ln -s /usr/lib/python3.8/dist-packages/tensorrt* .venv/lib/python3.8/site-packages/
-# Thor / Python 3.12
-ln -s /usr/lib/python3.12/dist-packages/tensorrt* .venv/lib/python3.12/site-packages/
-source .venv/bin/activate
-python -c 'import torch, tensorrt; print(torch.__version__, torch.cuda.is_available(), tensorrt.__version__)'
-# Thor only
-python scripts/check_thor.py
-```
-
-Do not link Python 3.10 TensorRT extensions into Python 3.8/3.12 environments. System
-TensorRT must match JetPack; the current runtime supports Orin's 8.5 and Thor's 10.x,
-not 11.x. Repeat the selected group flags on subsequent syncs. The Thor check tests
-CUDA math, NMS, TensorRT Builder and ONNX Runtime CUDA execution without CPU fallback;
-camera, rendering and pose inference still require Thor hardware validation. ONNX Runtime
-is not part of the main WAPR pose backend. Optional detector dependencies remain separate.
-
-```bash
-export WAPR_CACHE_DIR="$PWD/.wapr_runtime"
+python -m wapr.export_engines --object-mode single
 python -m wapr_realsense --check-camera
-python scripts/setup_runtime.py
-WAPR_TRT_WORKSPACE_GB=4 python -m wapr.export_engines --object-mode single
-python -m wapr_realsense --config configs/box.yaml --web --web-host 0.0.0.0 --backend trt --object-mode single
 ```
 
-The Jetson system/container still needs the CUDA toolkit, a C++ compiler, NVIDIA EGL/GL
-libraries and camera USB access. Build engines and the renderer on the target rather
-than copying desktop `.engine` or `.so` files.
+Build engines on the target machine; build workspace defaults to **4 GiB**. `single` is the default capacity for this application.
 
-TRT mode loads engines directly without PyTorch network weights. Pose engines share one
-execution-memory buffer sized to their largest requirement, with serialized submissions;
-weights and persistent context state remain separate. Existing engines need no rebuild.
-Check all four engines together with `python scripts/check_trt_memory.py --run` (synthetic
-12/6-candidate inputs, not an accuracy test), then run the application with `--backend trt`.
-`WAPR_TRT_CONTEXT` reports each requirement; `WAPR_TRT_MEMORY` reports the allocated shared buffer.
-The operator measured 13,460.52 MiB of separate execution requirements versus a 4,266.14 MiB
-shared buffer on Orin NX 16GB. Synthetic inference reported non-finite outputs, so TensorRT
-numerical correctness and pose tracking remain unverified. `WAPR_TRT_SHARED_MEMORY=0` restores
-separate context allocations and may exhaust memory on Orin NX 16GB.
+### 3. Start the interface
 
-Choose engine capacity with `--object-mode single|multi` (application/export default: `single`).
-With the current recipe, single mode exports profiles `2/12/12` and four pose engines; multi mode
-exports `2/12/120` and adds `wbps_batch`. Single-object tracking uses `wbps.engine` directly.
-The RealSense UI still tracks one target; this option selects engine capacity, not a multi-target UI.
-Existing `2/12/120` engines remain accepted in single mode.
+Browser visualization with YOLOE automatic initialization:
 
 ```bash
-export WAPR_TRT_WORKSPACE_GB=4
-python -m wapr.export_engines --object-mode single                     # four engines, sequentially
-python -m wapr.export_engines --object-mode single --engine sapr       # only SAPR
-python -m wapr.export_engines --object-mode multi --engine wbps_batch  # only the multi-object scorer
-python -m wapr.export_engines --object-mode multi                      # full multi-object set
-python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single
+python -m wapr_realsense --config configs/box.example.yaml --web --web-host 0.0.0.0
 ```
 
-Each engine exports in a fresh process; the process exits before the next one starts. PyTorch
-export models and input tensors are released before TensorRT building. Exporting a selected
-engine replaces only its corresponding file in the existing cache; modes share the same paths.
-To investigate non-finite outputs without rebuilding, run the same model/input in separate processes:
+Open `http://127.0.0.1:8000` locally or `http://<device-ip>:8000` over the LAN. Change the port with `--web-port`.
+After warmup, click **Detect**; draw a box first in manual mode. Switching initialization mode or clicking Detect again resets the track.
+
+For an OpenCV window, omit `--web --web-host 0.0.0.0`. In manual mode, draw a box on the frozen image and confirm with Enter/Space.
+Use `r` to reinitialize, `s` to save a snapshot and `q`/Esc to exit.
+
+## Initialization modes
+
+| Mode | Config | Input and purpose |
+| --- | --- | --- |
+| YOLOE | [box.example.yaml](configs/box.example.yaml) | Bundled box mesh and NPZ; localization during initialization and recovery |
+| Manual ROI | [box.yaml](configs/box.yaml) | User-supplied bbox; no detector loaded |
+
+### YOLOE reference-image detection
+
+The public box example includes [reference images and an encoded NPZ](assets/references/box/), ready to load.
+To create your own features, run the bundled [camera_yoloe_fuse.py](examples/camera_yoloe_fuse.py);
+there is no need to switch to the Ultralytics repository:
 
 ```bash
-python scripts/check_trt_memory.py --run --models wapr_w_mask --memory shared
-python scripts/check_trt_memory.py --run --models wapr_w_mask --memory private
+python examples/camera_yoloe_fuse.py \
+  --camera 8 --model yoloe-26s-seg.pt \
+  --conf 0.05 --imgsz 640 --device 0 \
+  --output outputs/yoloe_reference
 ```
 
-The diagnostic reports NaN/Inf counts for every tested output/batch and exits nonzero if any fail.
-Use `--input random` for a second synthetic input set; neither input set validates pose accuracy.
+`--camera` is the OpenCV camera index; collection needs a local desktop window. Capture different views of the same target:
 
-Drag a tight box in the frozen image and press Enter/Space. In the live window:
-`r` reinitializes, `s` saves RGB-D and pose, and `q`/Esc exits.
-The default camera profile is 640×480 at 15 Hz; capture rate is not inference throughput.
+| Key | Action |
+| --- | --- |
+| `S` | Freeze the frame and select the target; Enter/Space confirms. Repeat for more views |
+| `F` | Fuse all views, encode and directly export NPZ, then preview detection |
+| `U` / `R` | Undo the last view / clear collection; press `F` again after changes |
+| `M` / `Q` | Toggle mask preview / quit |
 
-Use another mesh without a config:
+Output files:
+
+```text
+outputs/yoloe_reference/
+  prompt_embeddings.npz  # Reference features required by the tracking runtime
+  reference_mosaic.png   # Collected views
+  boxes.xyxy.yaml        # Boxes in mosaic coordinates
+  reference_boxes.jpg    # Box visualization
+```
+
+One NPZ represents one target class with potentially multiple views. `F` completes reference encoding;
+the runtime only loads NPZ. It accepts no image + bbox input and never repeats reference encoding,
+reducing startup preparation. Detection inference on current frames still runs normally.
+Re-export after changing references or weights, and use the same model for collection and tracking.
+
+Use the exported NPZ for tracking:
 
 ```bash
-python -m wapr_realsense --mesh /absolute/path/model.obj --mesh-unit m --backend trt
+python -m wapr_realsense --config configs/box.example.yaml \
+  --yoloe-prompt-embeddings outputs/yoloe_reference/prompt_embeddings.npz \
+  --web --web-host 0.0.0.0
 ```
 
-Headless ROI operation requires an initial box in rectified color-image pixels:
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --no-display --bbox 180 100 280 300
-```
-
-## Optional automatic initialization
-
-```bash
-python -m wapr_realsense --config configs/box.auto.yaml
-# Or enable it for any existing target configuration, including headless operation:
-python -m wapr_realsense --config configs/box.yaml --init auto --no-display
-```
-
-Auto mode uses the existing WAPR detector: GroundingDINO proposes boxes, SAM2 segments them,
-and DINOv2 matches candidates against rendered views of the configured mesh. WAPR estimates
-poses from the detected masks; the highest `score_6d` candidate passing `--min-score` is selected.
-No reference photo is used. Multiple identical instances cannot be distinguished by physical identity.
-Only search frames run detection; accepted poses use the existing six-candidate tracker.
-
-YAML configurations group detection options under `groundingdino_sam2_dinov2_detect`:
+For a different target, also update its CAD mesh and scale. Or set the NPZ path in YAML, relative to that YAML file:
 
 ```yaml
-groundingdino_sam2_dinov2_detect:
-  activate: true       # false selects manual ROI initialization
-  use_sam2: false      # true enables SAM2; false uses bbox input
-  interval: 1.0
-  score: 0.1
-  backend: trt
-  dino: vitl14
-  grounding: swinb
-  template_cache: ../.wapr_runtime/templates/box_vitl14.pt
+yoloe_detection:
+  activate: true
+  model: yoloe-26s-seg.pt
+  prompt_embeddings: ../outputs/yoloe_reference/prompt_embeddings.npz
+  conf: 0.05
+  imgsz: 640
+  device: "0"
+  max_candidates: 3
 ```
 
-| Field within the section | Default | Purpose |
-| --- | --- | --- |
-| `activate` | `false` | Enable automatic initialization and detection after tracking loss |
-| `use_sam2` | `true` | Use SAM2 masks; `false` uses bbox regions for matching and bbox input for WAPR |
-| `interval` | `1.0` | Seconds after a failed search completes before the next attempt |
-| `score` | `0.1` | 2D template-match acceptance gate, separate from top-level `min_score` |
-| `backend` | `trt` | DINOv2 encoder backend; `torch` also supported |
-| `dino` | `vitl14` | `vits14`, `vitb14` or `vitl14` |
-| `grounding` | `swinb` | `swint` or `swinb` |
-| `template_cache` | unset | Optional `.pt` cache; unset builds templates in GPU memory each run |
+If you already have a mosaic and xyxy box list, [prepare_yoloe_reference.py](scripts/prepare_yoloe_reference.py)
+exports NPZ offline; see `--help` for arguments. `box.example.yaml` enables automatic mode.
+For custom configs, select `--init auto` and `yoloe_detection.activate: true`.
+`box.yoloe.yaml` retains the local target setup; use `box.example.yaml` for the public example.
 
-Configuration files use `.yaml` or `.yml`; detection options belong in the section above.
-Explicit CLI flags override config values: `--init auto` / `--init roi` overrides `activate`,
-and `--detect-use-sam` / `--no-detect-use-sam` overrides `use_sam2`. For example:
+YOLOE masks become tight boxes and WAPR uses its mask-free path. Initialization tries up to `max_candidates`
+high-confidence boxes and selects the accepted pose with the highest 6D score. Normal tracking does not run YOLOE.
+Recovery uses the highest-confidence depth-valid box without detection instance IDs.
+Add `--init roi` for manual initialization with YOLOE-assisted recovery. YOLOE uses PyTorch even when WAPR uses TensorRT.
+
+### Manual ROI initialization
 
 ```bash
-python -m wapr_realsense --config configs/box.auto.yaml --no-detect-use-sam
+python -m wapr_realsense --config configs/box.yaml --web --web-host 0.0.0.0
 ```
 
-This skips SAM2 model loading, inference and checkpoint downloads. GroundingDINO and DINOv2
-still run. Rectangle regions support DINO cropping and duplicate suppression; the pose estimator
-receives `bbox_xywh` without a mask and uses `wapr_wo_mask`. More background may enter matching
-and depth initialization, so detection scores and accuracy should be checked again. SAM2 timing
-is shown as `skipped`. Use `--detect-use-sam` to override a disabled config.
+Draw a box on the frozen frame, then click Detect. Without YOLOE enabled, this route needs no detector or reference image.
+Runs without a config also default to manual ROI.
 
-Auto mode prepares optional detector dependencies and downloads missing weights on first use;
-the pose-only setup script does not preload them. The DINO TensorRT backend builds its engine
-when needed; GroundingDINO and SAM2 remain FP32. Expect additional startup time and GPU memory.
-An incompatible environment is reported by the existing optional-dependency bootstrap.
-The sample cache is relative to its configuration file, under `.wapr_runtime/templates/` rather than
-`.wapr_runtime/cache/`. Mesh/texture, encoder or source changes can invalidate the cache.
-The application automatically selects a versioned sibling path, rebuilds once and reuses it on later
-runs; old files are preserved. `DET2D_CAD_CACHE_CHANGED` prints the selected path. No directory
-deletion is needed. Setting `template_cache` to `null` disables the disk template cache.
+The original WAPR three-model baseline is available for comparison: `python -m wapr_realsense --config configs/box.auto.yaml --web`.
 
-Output status is `searching` with `valid=false` until initialization succeeds, then `initialized_auto`
-and `tracking`. A rejected track emits `lost` without a pose, followed by a new search on the next frame.
-Passing scores do not detect every drift or guarantee the selected object's identity.
-The first call includes three detector warmup passes and pose warmup;
-use later searches when assessing recovery latency. Search runs synchronously and pauses pose output.
+## Tracking and recovery
 
-The terminal displays three groups in milliseconds:
-
-- **Yellow `[WARMUP]`**: after the initial detector warmup, reports total time, average time
-  and call count for GroundingDINO, SAM2 and DINOv2. The first valid candidate batch also
-  reports total and average time for WAPR pose initialization warmup.
-- **Green `[TRACKING]`**: reports WAPR mean time and frame count every 5 seconds by default.
-  Loss, reinitialization and exit flush any remaining samples. Only tracking updates are
-  included, including rejected updates and first-call overhead. Set `--timing-interval 2`
-  to change the reporting interval.
-- **Cyan `[INIT]` / `[REINIT]`**: announces the first search and subsequent searches, then
-  reports GroundingDINO, SAM2, DINOv2 and WAPR pose initialization times, detection total,
-  complete initialization total, candidate counts and search result. The first complete total
-  includes warmup; later searches reuse completed warmup. Stages that do not run show `skipped`.
-
-GroundingDINO includes image preprocessing, inference and box filtering; SAM2 includes segmentation
-and mask postprocessing. DINOv2 includes proposal crop preprocessing and encoding across all batches,
-excluding template matching. Detection total also includes matching and postprocessing. WAPR tracking
-includes the complete update and validity check; pose initialization evaluates all valid candidates
-before selecting a target. Values are wall-clock milliseconds including CPU work and GPU waits,
-with CUDA synchronized before and after each stage. These extra synchronizations can affect stage
-overlap. Colors are enabled automatically in a terminal; redirected output or `NO_COLOR=1` uses plain text.
-
-Add `--profile-tracking` to reuse the existing timers for a tracking breakdown:
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
-  --web-host 0.0.0.0 --web-port 8000 --profile-tracking --timing-interval 5
-```
-
-Each tracking window also reports WAPR, SAPR and WBPS milliseconds per frame, with nested
-`crop` (rendering/crop preprocessing) and `network` (forward call including buffer setup) times.
-Repeated iterations are summed per frame. `other` is the total minus the three stage totals;
-crop/network values are already included in their parent stages. The same summaries appear
-in the browser. Profiling defaults off because extra CUDA synchronization changes latency;
-compare normal tracking performance with the flag removed. Initialization and warmup are excluded.
-
-The crop path builds one perspective sampling grid for RGB, XYZ and the optional mask, and
-omits the unused observed-depth crop. It uses the renderers' documented 0–1 RGB output directly,
-avoiding a GPU scalar range check. CPU comparisons against independent Kornia warps cover
-mask/no-mask inputs and batches 1/2/3/6/12; Jetson latency and pose accuracy still need comparison.
-These preprocessing changes reuse existing engines.
-
-Choose tracking-only work with `--tracking-preset` (initialization keeps its existing recipe):
-
-| Preset | WAPR iterations | SAPR iterations | WBPS candidates | Network calls/frame |
-| --- | ---: | ---: | ---: | ---: |
-| `full` (default) | 3 | 2 | 6 | 6 |
-| `balanced` | 2 | 1 | 3 | 4 |
-| `fast` | 1 | 1 | 3 | 3 |
-| `small-motion` | 0 | 1 | 2 | 2 |
-
-`full` uses the current recipe iteration counts (3/2 by default). It reuses branches only when
-the supplied center and previous poses are exactly equal. In the normal one-object path this
-reduces WAPR crop rows 2→1, SAPR rows 3→2 and scoring crop rows 6→4; WBPS still receives all six
-original candidates in their original order, including duplicates. Add `--no-reuse-tracking`
-with `full` to compare against the previous workload. Different center/previous poses retain
-their separate branches; no reuse crosses object identities.
-
-`balanced`/`fast` score previous, WAPR(center) and SAPR(WAPR(center)); `small-motion` scores
-previous and SAPR(center). Center defaults to the previous pose. Reduced presets change
-candidate scoring and recovery behavior: compare drift, loss rate and score thresholds on
-your hardware. Existing single-object engines support these groups; refinement batch=1 is
-still padded to the engine minimum (currently 2). Actual batch=1 engine export is not included.
-Multi-object reduced presets require `wbps_batch.engine`, not the fixed-six tracking scorer.
-The preset and reuse option are recorded in `session.json`; warmup uses the selected preset.
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --web --backend trt --object-mode single \
-  --web-host 0.0.0.0 --web-port 8000 --tracking-preset balanced --profile-tracking
-```
-
-Set `tracking_preset: balanced` in YAML for the same behavior. CLI flags override YAML values.
-CPU regression tests verify candidate multiplicity, row reductions and preset routing.
-
-### Kalman motion prediction
-
-The sample target YAML configs enable a constant-velocity pose predictor. It supplies the
-initial pose for WAPR tracking in every preset, including the browser interface. Outputs
-remain accepted WAPR estimates; the filter does not replace them with smoothed or predicted
-poses. Runs without a config default to disabled; use `--kalman` or `--no-kalman` to override.
+Normal tracking follows **Kalman prediction → WAPR/SAPR refinement → WBPS scoring**.
+Kalman supplies a search seed; output poses remain accepted WAPR estimates. It does not directly remove model error or TRT numerical drift.
 
 ```yaml
 kalman_motion_prediction:
   activate: true
-  translation_measurement_std_m: 0.01
-  rotation_measurement_std_rad: 0.05
-  translation_acceleration_std_m_s2: 1.0
-  rotation_acceleration_std_rad_s2: 3.0
   max_dt_s: 0.5
-```
-
-```bash
-python -m wapr_realsense --config configs/box.yaml --kalman
-# Compare using the same tracking preset and input:
-python -m wapr_realsense --config configs/box.yaml --no-kalman
-```
-
-Measurement standard deviations set how strongly accepted WAPR poses correct the filter;
-larger values trust the motion model more. Acceleration standard deviations control how
-quickly velocity can change; larger values allow faster adaptation. These are starting
-parameters, not calibrated sensor uncertainties. All numeric settings must be positive and finite.
-The filter uses actual sensor timestamp intervals (host reception time if unavailable), a
-12-dimensional position/rotation-error/velocity state, and SO(3) rotation increments.
-Duplicate/backward timestamps, clock-domain changes or gaps exceeding `max_dt_s` discard
-stale velocity. Initialization, reset and tracking loss also restart the filter. Prediction
-behind the camera falls back to the last accepted pose. The optional recovery window below controls retries after loss; motion prediction alone
-does not provide occlusion recovery.
-
-The design references [FoundationPose++'s Kalman motion predictor](https://github.com/teal024/FoundationPose-plus-plus/blob/master/src/utils/kalman_filter_6d.py),
-with sensor-time prediction and rotation errors replacing fixed time steps and Euler angles.
-Settings are saved in `session.json`. CPU tests cover synthetic motion prediction and lifecycle
-routing; improvement on live RGB-D input and Jetson overhead still require measurement.
-
-### Short tracking failures
-
-Target sample configs enable a bounded recovery window:
-
-```yaml
 tracking_recovery:
   activate: true
-  timeout_s: 1.0
+  timeout_s: 5.0
   confirm_frames: 2
 ```
 
-After an established track fails, `recovering` retains its last accepted pose and Kalman
-state, and continues refinement on new frames. Outputs have `valid=false` and null pose;
-the preview does not draw a predicted box. Rejected candidates never update the filter.
-Two consecutive distinct frames with accepted WAPR/SAPR refinement restore tracking.
-Unrefined previous/center candidates do not confirm recovery or update Kalman.
-Prediction is capped at `kalman_motion_prediction.max_dt_s` since the last refined observation
-(default 0.5 s); its endpoint is then held while refinement continues. Clock discontinuities
-or invalid predictions discard stale velocity. Without Kalman, retries use the last accepted pose.
+A rejected tracking update enters `recovering`, retaining the last accepted pose and Kalman state for refinement on new frames.
+With YOLOE enabled, a detection box and depth provide a new translation candidate while preserving predicted rotation.
+Without a detection, the Kalman seed is retained. Recovery requires `confirm_frames` consecutive distinct capture frames
+with accepted refinement; rejected results never update the filter. Prediction extrapolates for at most `max_dt_s`,
+then holds that endpoint while retrying. Repeated failures do not extend the recovery window.
 
-The window starts at the first failure and is not extended by repeated failures. At 1 s,
-state is cleared: manual mode waits for a new ROI; auto mode searches again. Failed initial
-registration does not enter recovery. Reset, Detect and mode changes also clear recovery state.
-The browser displays `RECOVERING` while continuing inference; `[RECOVERY]` logs record
-entry, success and timeout. Attempts remain part of tracking timings; settings are saved
-in `session.json`. No-config runs default to disabled. Override with `--tracking-recovery`
-or `--no-tracking-recovery`, or tune `--recovery-timeout-s` and `--recovery-confirm-frames`.
-This adds no visual tracker or occlusion model. CPU lifecycle tests do not establish live
-recovery accuracy or Jetson performance.
+During recovery, output has `valid=false` and a null pose. Timeout clears state: automatic mode searches again;
+manual mode waits for a new box. The example above uses 5 seconds; check each config for its actual value.
+Without a config, Kalman and recovery default to disabled. Compare using `--no-kalman` or `--no-tracking-recovery`.
 
-### Jetson tracking measurements
-
-Orin NX 16GB, JetPack 5.1.1 / CUDA 11.4, TensorRT 8.5.2.2,
-torch 2.1.0a0+41361538.nv23.06, MAXN with `jetson_clocks` enabled. Input was a RealSense
-D435I at 640×480/15 Hz, using the box mesh, manual ROI initialization, TensorRT engines,
-shared execution memory and the web interface. Measurements enabled `--profile-tracking
---timing-interval 5` and exclude startup, warmup and initialization.
-
-| Tracking preset | Approximate mean update time | Observed window-mean range | Time reduction vs. full |
-| --- | ---: | ---: | ---: |
-| `full` | 187 ms | 186.55–188.59 ms | — |
-| `balanced` | 120 ms | 119.00–120.76 ms | 36% |
-| `fast` | 94 ms | 93.44–94.47 ms | 50% |
-| `small-motion` | 58 ms | 57.40–59.42 ms | 69% |
-
-Ranges include partial windows flushed at loss/reinitialization/exit; they are ranges of
-logged averages, not per-frame percentiles. These were separate live runs with different
-manual ROIs, not a controlled replay benchmark. Synchronized profiling adds overhead, and
-the timings exclude camera waiting, pose-file writing, browser encoding and network/display
-latency. At about 58 ms, processing capacity exceeds the 15 Hz camera input; actual pose
-output remains limited by acquisition and other pipeline work.
-
-The the projected bounding box slightly less accurate with `balanced`, `fast`
-and `small-motion`, but provisionally acceptable. Pose accuracy, drift and loss rate have not
-been quantified; FP16 numerical parity is also unverified. `full` remains the default/reference.
-Use the same recorded RGB-D sequence for a controlled accuracy and latency comparison.
-
-## Browser demo
-
-```bash
-python -m wapr_realsense --config configs/box.auto.yaml --web
-# Start in manual mode, without loading automatic detection models:
-python -m wapr_realsense --config configs/box.yaml --web
-# LAN access on Jetson:
-python -m wapr_realsense --config configs/box.auto.yaml --web --web-host 0.0.0.0
-```
-
-Open `http://127.0.0.1:8000` locally, or `http://<jetson-ip>:8000` over the LAN.
-The camera view shows the 3D box and axes. A small dashboard on the right contains
-the status, manual initialization switch, Detect button and timing summaries. All static resources ship with
-the Python package; Node, external CDNs and a desktop display are unnecessary.
-
-- **WARMUP**: load and warm up models; blank preview and disabled controls. All warmup results are discarded.
-- **INITIALIZED**: camera preview is available; wait for the user to click **Detect**.
-- **Looking for object**: initial detection or automatic recovery after tracking loss. Detect is disabled while searching.
-- **TRACKING**: show the pose overlay. Clicking Detect again starts a new search.
-
-The switch initially follows the configured initialization mode. Enable manual
-initialization to freeze a frame, drag a bounding box, then click Detect. The
-redraw button obtains a new frozen frame. Pixel coordinates are mapped to the
-original image and tied to that exact RGB-D frame. Successful tracking restores
-the live view. **Loss in manual mode clears the old box and prompts the user to
-draw a new one; it never searches automatically or reuses the old box.** Automatic
-mode retains search and recovery. Warmup and search disable the switch. Switching
-from manual to automatic loads and warms detection models on demand under WARMUP,
-then waits for Detect. Changing modes resets the previous track.
-
-The dashboard receives the same `[WARMUP]`, latest `[INIT]` / `[REINIT]`, and
-`[TRACKING]` summaries as the terminal. Tracking means and frame counts use
-`--timing-interval`. Warmup details collapse when ready and remain available.
-SAM2 / DINOv2 show `skipped` when no proposals exercise those stages. Pose and
-tracking warmup use representative single-instance workloads; different real
-candidate batch sizes may still incur additional first-use overhead.
-During synchronous searches, the preview holds the search input frame while
-HTTP status requests remain responsive. Browser disconnection hides the old
-preview and disables controls; reconnection restores the current session.
-
-To inspect the UI without a camera or CUDA, use the explicitly labelled simulation:
-
-```bash
-python -m wapr_realsense --web-demo
-```
-
-The simulation warms up for about 2 seconds and supports both modes; it defaults
-to manual drawing. It finds an object about 2 seconds after Detect and simulates
-loss after about 12 seconds of tracking, then waits for a new box or recovers
-automatically according to the selected mode. Real operation preserves the pose
-file output contracts and adds `initialization_mode` to each frame record.
-Jetson inference has not been validated here.
+Bbox depth can include background. Large rotations, long occlusions and similar objects can still cause failure or target switching.
+YOLOE reference loading and CPU detection have been exercised; live occlusion-recovery success rates and YOLOE performance on Jetson still need measurement.
 
 ## Pose output
 
-The box config writes `outputs/box/latest.json`, `poses.jsonl`, `camera.json` and `session.json`.
-`latest.json` is replaced atomically. Invalid/stopped records contain `valid=false` and no pose.
-The reader checks validity and freshness, rejecting data older than 500 ms by default (`--max-age-ms`).
-Complete JSON records are saved for every frame. The terminal shows compact timing by default;
-add `--log-poses` to also print `POSE_JSON` every ten processed frames, or combine it with
-`--print-every 1` to print every frame.
+The `output` directory contains:
+
+| File | Content |
+| --- | --- |
+| `latest.json` | Atomically updated latest result for robot-side readers |
+| `poses.jsonl` | Complete per-frame records |
+| `camera.json` / `session.json` | Camera parameters and run configuration |
 
 ```bash
-python examples/read_pose.py --input outputs/box/latest.json
+python examples/read_pose.py --input outputs/box_example/latest.json
 ```
 
-The transform maps the original, unit-scaled mesh frame into the rectified color-camera optical frame:
+The reader checks validity and freshness, rejecting results older than 500 ms by default.
+Poses include a `4×4` transform, `R`, translation in meters and an `xyzw` quaternion:
 
 ```text
 p_camera = R @ p_mesh + t_m
 T_base_object = T_base_camera @ T_camera_object
 ```
 
-Camera axes are X right, Y down, Z forward. A robot-base pose requires measured camera calibration.
-WBPS scores are ranking signals, not success probabilities; occlusion, symmetry, depth holes and mesh
-scale mismatch can cause drift or incorrect poses even when a score passes the gate.
+The mesh frame is the original model frame after unit conversion and scaling. Camera axes: X right, Y down, Z forward.
+Base-frame output requires measured calibration; see [camera_to_base.example.yaml](configs/camera_to_base.example.yaml)
+and the reader's `--camera-to-base` option. WBPS scores rank candidates; they are not success probabilities.
 
-## Project layout
+## Useful commands
 
-```text
-wapr_realsense/  camera, tracking session, CLI, geometry and robotics output
-wapr/            WAPR inference, optional detection/SAM modules and original notices
-configs/         single-target and camera-calibration templates
-examples/        robot-side pose reader
-scripts/         pose runtime setup
-tests/           CPU contract tests; optional SDK geometry test
-assets/meshes/   local object assets, excluded from Git
+List CLI options with `python -m wapr_realsense --help`.
+Run CPU regression tests with:
+
+```bash
+python -B -m unittest discover -s tests -v
 ```
 
-Environments, caches, weights, engines and local meshes are excluded by `.gitignore`.
-Detection and SAM sources support auto mode; ROI mode does not load them.
+Inspect the browser UI without a camera or CUDA using `python -m wapr_realsense --web-demo`; it displays simulated data.
 
-## Validation and deployment status
+## TODO
 
-- D455 640×480/15 Hz capture and TensorRT initialization/tracking were exercised on the desktop.
-- The operator reported good results using the local box and ROI workflow before this reorganization.
-- CPU tests cover depth conversion/rectification, configuration, loss state and robotics-output contracts.
-- Auto-mode tests cover CLI/replay wiring, retry timing, candidate selection and reacquisition with
-  mocked inference. Real three-model detection, startup memory and live auto-mode accuracy remain unverified.
-- JetPack 5.1.1 checks cover basic GPU operations, D435I capture and renderer compilation/initialization;
-  the complete pose pipeline remains unverified there.
-- The backend's general engine profiles and model loading are unchanged; this is not yet the proposed
-  single-target low-memory engine optimization.
-
-Run tests with `python -B -m unittest discover -s tests -v`.
+- [ ] **Evaluate YOLOE TensorRT acceleration**: determine whether export is worthwhile by comparing PyTorch / TensorRT latency, GPU memory and detection accuracy.
+- [ ] **Benchmark Jetson FPS**: measure detection, initialization, tracking and end-to-end FPS / latency on Orin NX and AGX Thor, recording resolution, model and power mode.
+- [ ] **Document a complete 3D mesh workflow**: cover multi-view capture, reconstruction, mesh cleanup, texturing, scale calibration, coordinate frames and export validation.
+- [ ] **Run module ablations**: compare detection pipelines, Kalman prediction, bounded recovery, tracking presets and inference backends for speed, pose error, drift, loss rate and recovery success.
+- [ ] **Compare with FoundationPose**: use identical hardware, RGB-D sequences, meshes and initialization conditions to evaluate pose accuracy, speed, resource usage and recovery after occlusion.
 
 ## Attribution and license
 
-WAPR-realsense is an application adaptation of WAPR, not an official upstream release.
-The inference core derives from WAPR commit `f165cec8ebdd48ae6f46d06a46c40d796ab80b71`.
-This application adds RealSense acquisition and a live pose interface while retaining the upstream backend modules.
-Source retains [LGPL-2.1-only](LICENSE); model weights retain their separate
-[weight license](WEIGHTS_LICENSE.txt). Preserve [authors](AUTHORS.md),
-[third-party notices](THIRD_PARTY_NOTICES.txt) and bundled license files.
+This is an application adaptation of WAPR, not an official upstream release. The inference core derives from commit
+`f165cec8ebdd48ae6f46d06a46c40d796ab80b71`, with upstream backend modules retained.
+Kalman design references [FoundationPose++](https://github.com/teal024/FoundationPose-plus-plus).
+Code retains [LGPL-2.1-only](LICENSE); weights have a separate [license](WEIGHTS_LICENSE.txt).
+Preserve [authors](AUTHORS.md), [third-party notices](THIRD_PARTY_NOTICES.txt) and bundled license files.

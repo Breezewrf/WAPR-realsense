@@ -242,7 +242,8 @@ def track_camera(args, state):
     """Load, warm up, then wait for Detect before accepting any real pose."""
     import torch
     from wapr import WAPREstimator
-    from .app import timed_step
+    from .app import timed_step, yoloe_metadata
+    from .yoloe import build_yoloe
     from .camera import RealSenseCamera
     from .geometry import draw_pose, load_mesh
     from .initialization import build_initializer, warmup_pose_inputs
@@ -273,6 +274,7 @@ def track_camera(args, state):
             "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
             "kalman_motion_prediction": asdict(settings_from_args(args)),
             "tracking_recovery": asdict(recovery_from_args(args)),
+            "yoloe_detection": yoloe_metadata(args),
             "init": args.init, "web": True, "minimum_score": args.min_score,
             "camera_frame": args.camera_frame, "object_frame": args.object_frame,
             "pose_convention": "original_scaled_mesh_to_color_optical_frame",
@@ -289,6 +291,9 @@ def track_camera(args, state):
                 initializer.warmup(frame)
             else:
                 warmup_pose_inputs(estimator, prepared, diameter, frame)
+                detector = build_yoloe(args)
+                if detector is not None:
+                    detector.warmup(frame)
             # Tracking has a distinct six-hypothesis workload and may lazily load
             # its engine. Exercise it now with a discarded synthetic pose.
             depth = np.ones_like(frame.depth_m)
@@ -307,7 +312,8 @@ def track_camera(args, state):
             session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
                                   initializer=initializer, detect_interval=args.detect_interval,
                                   tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking,
-                                  kalman_settings=settings_from_args(args), recovery_settings=recovery_from_args(args))
+                                  kalman_settings=settings_from_args(args), recovery_settings=recovery_from_args(args),
+                                  recovery_detector=build_yoloe(args))
             state.set_status("INITIALIZED")
             active, number, count, manual_attempts = False, frame.number, 0, 0
             while not state.stop.is_set() and (not args.max_frames or count < args.max_frames):

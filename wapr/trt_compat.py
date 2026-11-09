@@ -3,7 +3,6 @@
 
 import math
 import os
-import platform
 import re
 
 
@@ -18,9 +17,8 @@ def network_flags(trt):
 
 
 def workspace_bytes():
-    """Use a smaller build workspace on ARM64; permit an explicit override."""
-    default = "1" if platform.machine().lower() in ("aarch64", "arm64") else "8"
-    value = float(os.environ.get("WAPR_TRT_WORKSPACE_GB", default))
+    """Default to 4 GiB on all platforms; permit an explicit override."""
+    value = float(os.environ.get("WAPR_TRT_WORKSPACE_GB", "4"))
     if not math.isfinite(value) or value <= 0 or int(value * 1024 ** 3) < 1:
         raise ValueError("WAPR_TRT_WORKSPACE_GB must be a positive finite size in GiB")
     return int(value * 1024 ** 3)
