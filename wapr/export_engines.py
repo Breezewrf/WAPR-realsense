@@ -5,8 +5,8 @@
 # 作者与版权人：Yulin Wang；使用、修改与再分发须遵守项目 LICENSE。
 # Third-party portions retain their original notices and terms; see THIRD_PARTY_NOTICES.txt.
 
-# Export FP32 ONNX next to each weight, then a TensorRT 10 FP16 engine.
-# 在每份权重旁边导出 FP32 ONNX，再写 TensorRT 10 的 FP16 引擎。
+# Export FP32 ONNX next to each weight, then a TensorRT 8.5+/10 FP16 engine.
+# 在每份权重旁边导出 FP32 ONNX，再写 TensorRT 8.5+/10 的 FP16 引擎。
 # Run from anywhere: python -m wapr.export_engines
 # 任意目录可运行：python -m wapr.export_engines
 import sys
@@ -26,6 +26,7 @@ from wapr import recipe
 from wapr.model_metadata import checkpoint_metadata, write_onnx_metadata, read_onnx_metadata, pack_engine
 from wapr.nets import load_net
 from wapr.pose_groups import wbps_group_sizes
+from wapr.trt_compat import network_flags, workspace_bytes, onnx_opset_limit, parser_error_message
 
 
 def _onnx_unflatten(graph, tensor, axis, sizes):
@@ -114,10 +115,10 @@ def _onnx_scaled_dot_product_attention(graph, query, key, value, mask=None,
     return graph.op("MatMul", probabilities, value)
 
 
-def onnx_export_options():
-    """Keep the legacy exporter and derive an opset supported by this torch.
+def onnx_export_options(tensorrt_version=None):
+    """Keep the legacy exporter and match the torch and TensorRT opset limits.
 
-    保留同一追踪导出器，按当前 torch 支持的最高版本确定 ONNX opset。
+    保留同一追踪导出器，同时匹配 torch 和 TensorRT 支持的 ONNX opset。
     """
     try:
         from torch.onnx import _constants
@@ -125,7 +126,7 @@ def onnx_export_options():
     except (ImportError, AttributeError):
         from torch.onnx import symbolic_helper
         maximum_opset = int(symbolic_helper._onnx_main_opset)
-    options = {"opset_version": min(17, maximum_opset)}
+    options = {"opset_version": min(onnx_opset_limit(tensorrt_version), maximum_opset)}
     # Query the exporter registry before adding missing standard-operator mappings.
     # 先查导出注册表，仅补缺失算子的标准 ONNX 表达；不修改网络或 PyTorch forward。
     try:
@@ -150,7 +151,7 @@ def onnx_export_options():
         print("WAPR_ONNX_COMPAT", "aten::scaled_dot_product_attention -> MatMul/Softmax/MatMul", flush=True)
     if "dynamo" in inspect.signature(torch.onnx.export).parameters:
         options["dynamo"] = False
-    print("WAPR_ONNX_EXPORT", {"torch": torch.__version__, **options}, flush=True)
+    print("WAPR_ONNX_EXPORT", {"torch": torch.__version__, "tensorrt": tensorrt_version, **options}, flush=True)
     return options
 
 
@@ -372,7 +373,7 @@ def _shape(batch, channels, px):
 
 def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
     """
-    # Build one TensorRT 10 FP16 engine.
+    # Build one TensorRT 8.5+/10 FP16 engine.
 
         Inputs stay FP32.
 
@@ -381,11 +382,11 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
     ## Args
 
         - onnx_path: the FP32 ONNX file.
-        - engine_path: cache/weights/<name>.engine by default. min_shape, opt_shape, and max_shape are (batch, channels, px, px) for inputs A and B. A TensorRT version other than 10.x raises RuntimeError. A failed build raises RuntimeError.
+        - engine_path: cache/weights/<name>.engine by default. min_shape, opt_shape, and max_shape are (batch, channels, px, px) for inputs A and B. TensorRT 8.5+ in the 8.x series or 10.x is required. A failed build raises RuntimeError.
 
     ---
 
-    # 建一份 TensorRT 10 的 FP16 引擎。
+    # 建一份 TensorRT 8.5+/10 的 FP16 引擎。
 
         输入仍是 FP32。
 
@@ -395,121 +396,128 @@ def _build_fp16_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape):
 
         - onnx_path: FP32 的 ONNX。
         - engine_path: 默认 cache/weights/<name>.engine。
-        - min_shape、opt_shape、max_shape: 输入 A 和 B 的 (batch, channels, px, px)。不是 TensorRT 10.x 就抛出 RuntimeError。构建失败也抛出 RuntimeError。
+        - min_shape、opt_shape、max_shape: 输入 A 和 B 的 (batch, channels, px, px)。要求 TensorRT 8.x 中的 8.5+ 或 10.x。构建失败也抛出 RuntimeError。
 
 """
     import tensorrt as trt
 
-    if not str(trt.__version__).startswith("10."):
-        raise RuntimeError("TensorRT 10.x is required")
     logger = trt.Logger(getattr(trt.Logger, "WARNING"))
     builder = trt.Builder(logger)
-    network = builder.create_network(0)
+    network = builder.create_network(network_flags(trt))
     parser = trt.OnnxParser(network, logger)
     if not parser.parse(Path(onnx_path).read_bytes()):
-        raise RuntimeError("\n".join(str(parser.get_error(i)) for i in range(parser.num_errors)))
+        raise RuntimeError(parser_error_message(parser, onnx_path))
     profile = builder.create_optimization_profile()
     profile.set_shape("A", tuple(min_shape), tuple(opt_shape), tuple(max_shape))
     profile.set_shape("B", tuple(min_shape), tuple(opt_shape), tuple(max_shape))
     config = builder.create_builder_config()
     config.add_optimization_profile(profile)
     config.set_flag(trt.BuilderFlag.FP16)
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 * 1024 ** 3)
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes())
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         raise RuntimeError("FP16 engine build failed")
     Path(engine_path).write_bytes(pack_engine(bytes(serialized), read_onnx_metadata(onnx_path)))
 
 
-def main():
-    """
-    # Write FP32 ONNX using an opset supported by torch (up to 17), then a TensorRT 10 FP16 engine.
+POSE_ENGINES = ("wapr_w_mask", "wapr_wo_mask", "sapr", "wbps")
+ENGINE_NAMES = POSE_ENGINES + ("wbps_batch", "wbps_tracking")
 
-        The four names are wapr_w_mask, wapr_wo_mask, sapr, and wbps.
 
-        A and B are (batch, channels, crop_px, crop_px).
+def export_plan(object_mode, engine="all"):
+    """A single-object export needs no independent-object scorer."""
+    from wapr.engine_profile import pose_profile
+    pose_profile(object_mode)
+    if engine not in ("all", *ENGINE_NAMES):
+        raise ValueError("Unknown engine: " + engine)
+    if engine == "wbps_batch" and object_mode != "multi":
+        raise ValueError("wbps_batch requires --object-mode multi")
+    if engine != "all":
+        return (engine,)
+    return POSE_ENGINES + (("wbps_batch",) if object_mode == "multi" else ())
 
-        WBPS batch is one group's length L, never several objects stacked.
 
-        Run it as python -m wapr.export_engines.
+def _export_pose_onnx(name, object_mode):
+    """Return shapes after dropping all references to the PyTorch export model."""
+    import tensorrt as trt
+    from wapr.engine_profile import pose_profile
+    minimum, group, maximum = pose_profile(object_mode)
+    ckpt = recipe.weight_file(name)
+    runner = load_net(name, ckpt, engine=None, device="cuda:0")
+    channels, px = int(recipe.channels[name]), int(recipe.crop_px)
+    if name == "wbps":
+        wrapped = _ScoreWrap(runner.module).eval()
+        out_names = ["within_group", "between_group"]
+        dyn_out = {key: {1: "batch"} for key in out_names}
+    else:
+        wrapped = _RefineWrap(runner.module).eval()
+        out_names = ["trans", "rot"]
+        dyn_out = {key: {0: "batch"} for key in out_names}
+    A = torch.zeros(group, channels, px, px, device="cuda:0")
+    B = torch.zeros_like(A)
+    onnx_path = ckpt.with_suffix(".onnx")
+    torch.onnx.export(wrapped, (A, B), str(onnx_path), input_names=["A", "B"],
+                      output_names=out_names,
+                      dynamic_axes={"A": {0: "batch"}, "B": {0: "batch"}, **dyn_out},
+                      **onnx_export_options(trt.__version__))
+    write_onnx_metadata(onnx_path, checkpoint_metadata(ckpt, name))
+    print("exported", name, "object_mode", object_mode, "group", group, "max_batch", maximum, flush=True)
+    return onnx_path, ckpt.with_suffix(".engine"), tuple(
+        _shape(count, channels, px) for count in (minimum, group, maximum))
 
-        The if __name__ block is the caller.
 
-    ## Returns
-
-        - Returns None.
-
-    ---
-
-    # 在每份权重旁写 FP32 ONNX，使用 torch 支持且不高于 17 的 opset，再写 TensorRT 10 FP16 引擎。
-
-        四个名字是 wapr_w_mask、wapr_wo_mask、sapr 和 wbps。
-
-        A 和 B 是 (batch, channels, crop_px, crop_px)。
-
-        WBPS 的 batch 是一组的长度 L，不拼接多个物体。
-
-        运行方式是 python -m wapr.export_engines。
-
-        由 if __name__ 块调用。
-
-    ## 返回
-
-        - 返回 None。
-    """
-    device = "cuda:0"
-    export_options = onnx_export_options()
-    group = int(recipe.n_view * recipe.n_inplane)
-    if group not in wbps_group_sizes:
-        raise ValueError("recipe pose group %d is unsupported" % group)
-    min_batch = min(wbps_group_sizes)
-    opt_batch = group
-    max_batch = max(wbps_group_sizes)
-    for name in ("wapr_w_mask", "wapr_wo_mask", "sapr", "wbps"):
-        ckpt = recipe.weight_file(name)
-        runner = load_net(name, ckpt, engine=None, device=device)
-        channels = int(recipe.channels[name])
-        px = int(recipe.crop_px)
-        if name == "wbps":
-            wrapped = _ScoreWrap(runner.module).to(device).eval()
-            out_names = ["within_group", "between_group"]
-            dyn_out = {key: {1: "batch"} for key in out_names}
-            export_batch = group
-        else:
-            wrapped = _RefineWrap(runner.module).to(device).eval()
-            out_names = ["trans", "rot"]
-            dyn_out = {key: {0: "batch"} for key in out_names}
-            export_batch = group
-        # Trace one supported group; refinement rows remain independent in multi-instance batches.
-        # 用一个合法组追踪导出；修正行在多实例批量计算中仍各自独立。
-        A = torch.zeros(export_batch, channels, px, px, device=device)
-        B = torch.zeros_like(A)
-        onnx_path = ckpt.with_suffix(".onnx")
-        torch.onnx.export(
-            wrapped,
-            (A, B),
-            str(onnx_path),
-            input_names=["A", "B"],
-            output_names=out_names,
-            dynamic_axes={"A": {0: "batch"}, "B": {0: "batch"}, **dyn_out},
-            **export_options,
-        )
-        print("exported", name, "group", group, "max_batch", max_batch, flush=True)
-        write_onnx_metadata(onnx_path, checkpoint_metadata(ckpt, name))
-        _build_fp16_engine(
-            onnx_path,
-            ckpt.with_suffix(".engine"),
-            _shape(min_batch, channels, px),
-            _shape(opt_batch, channels, px),
-            _shape(max_batch, channels, px),
-        )
-        print("engine", name, flush=True)
-    # Include the independent-object scorer for the default multi-instance path.
-    # 同时构建独立物体批量计算评分引擎，供默认多实例路径使用。
-    del wrapped, runner, A, B
+def release_export_memory():
+    """Call after export model/tensor references have gone out of scope."""
+    import gc
+    gc.collect()
+    torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    from wapr.export_batch_engine import main as export_batch
-    export_batch()
+
+
+def _export_one(name, object_mode):
+    if name in POSE_ENGINES:
+        onnx_path, engine_path, shapes = _export_pose_onnx(name, object_mode)
+        release_export_memory()
+        _build_fp16_engine(onnx_path, engine_path, *shapes)
+        print("engine", name, flush=True)
+    elif name == "wbps_batch":
+        from wapr.export_batch_engine import main as export_batch
+        export_batch()
+    else:
+        from wapr.export_tracking_engine import main as export_tracking
+        export_tracking(object_mode=object_mode)
+
+
+def main(argv=None):
+    """Export selected engines sequentially, with one fresh process per engine."""
+    import argparse
+    import subprocess
+    from wapr.engine_profile import pose_profile
+    parser = argparse.ArgumentParser(description=__doc__ or main.__doc__)
+    parser.add_argument("--object-mode", choices=["single", "multi"], default="single",
+                        help="single: compact pose profile; multi: 120-row profile plus batched scoring")
+    parser.add_argument("--engine", choices=("all", *ENGINE_NAMES), default="all",
+                        help="Build just this engine, or the set needed by --object-mode")
+    parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    try:
+        plan = export_plan(args.object_mode, args.engine)
+    except ValueError as error:
+        parser.error(str(error))
+    if args._worker:
+        if len(plan) != 1:
+            parser.error("A worker must export exactly one engine")
+        _export_one(plan[0], args.object_mode)
+        return
+    print("WAPR_EXPORT_PLAN", {"object_mode": args.object_mode, "engines": plan,
+                               "profile": pose_profile(args.object_mode)}, flush=True)
+    for index, name in enumerate(plan, 1):
+        print("WAPR_EXPORT_START", {"engine": name, "index": index, "total": len(plan)}, flush=True)
+        # Wait for full process exit (including CUDA cleanup) before the next engine.
+        subprocess.run([sys.executable, "-u", "-m", "wapr.export_engines",
+                        "--object-mode", args.object_mode, "--engine", name, "--_worker"], check=True)
+        print("WAPR_EXPORT_DONE", {"engine": name, "index": index, "total": len(plan)}, flush=True)
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 """Small terminal timers for CPU work and synchronized CUDA stages."""
 
-from contextlib import ContextDecorator, contextmanager
+from contextlib import ContextDecorator, contextmanager, nullcontext
 from contextvars import ContextVar
 import os
 import sys
@@ -9,6 +9,7 @@ import time
 
 _phase = ContextVar("component_timing_phase", default=None)
 _collector = ContextVar("component_timing_collector", default=None)
+_listener = ContextVar("timing_listener", default=None)
 
 
 def print_timing(part, message):
@@ -18,13 +19,27 @@ def print_timing(part, message):
     if part in colors and sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb":
         line = f"\033[{colors[part]}m{line}\033[0m"
     print(line, flush=True)
+    listener = _listener.get()
+    if listener is not None:
+        listener(part, message)
+
+
+@contextmanager
+def timing_listener(listener):
+    """Forward the same summaries to an optional UI on the inference thread."""
+    token = _listener.set(listener)
+    try:
+        yield
+    finally:
+        _listener.reset(token)
 
 
 class TimingCollector:
     """Collect component samples in this scope instead of printing each call."""
 
-    def __init__(self):
+    def __init__(self, profile_pose=False):
         self.samples = {}
+        self.profile_pose = profile_pose
 
     def __enter__(self):
         self._token = _collector.set(self)
@@ -56,27 +71,59 @@ class TimingCollector:
 class TrackingTiming:
     """Report a mean over each wall-clock interval and flush partial windows on loss/exit."""
 
-    def __init__(self, interval=5.0):
+    def __init__(self, interval=5.0, profile=False):
         self.interval = interval
+        self.profile = profile
         self.count = 0
         self.total_ms = 0.0
         self.started = None
+        self.components = TimingCollector()
 
-    def add(self, elapsed_ms, now=None):
+    def add(self, elapsed_ms, now=None, components=None):
         now = time.monotonic() if now is None else now
         if self.started is None:
             self.started = now
         self.count += 1
         self.total_ms += elapsed_ms
+        if components is not None:
+            for name, (total, calls) in components.samples.items():
+                previous_total, previous_calls = self.components.samples.get(name, (0.0, 0))
+                self.components.samples[name] = (previous_total + total, previous_calls + calls)
         if now - self.started >= self.interval:
             self.flush()
 
     def flush(self):
         if self.count:
             print_timing("TRACKING", f"WAPR avg={self.total_ms / self.count:.2f} ms | frames={self.count}")
+            if self.profile and self.components.samples:
+                stages = []
+                measured = 0.0
+                for name in ("WAPR", "SAPR", "WBPS"):
+                    total = self.components.samples.get(name, (0.0, 0))[0]
+                    measured += total
+                    crop = self.components.samples.get(name + " crop", (0.0, 0))[0]
+                    network = self.components.samples.get(name + " network", (0.0, 0))[0]
+                    stages.append(f"{name}={total / self.count:.2f} ms "
+                                  f"(crop={crop / self.count:.2f}, network={network / self.count:.2f})")
+                other = max(0.0, self.total_ms - measured) / self.count
+                print_timing("TRACKING", "stages avg/frame: " + " | ".join(stages)
+                             + f" | other={other:.2f} ms | synchronized profiling")
         self.count = 0
         self.total_ms = 0.0
         self.started = None
+        self.components.samples.clear()
+
+
+def pose_component_timer(name, device):
+    """Reuse ComponentTimer only inside an explicitly enabled pose collector.
+
+    Detector collectors stay unaffected. Nested crop/network times are parts of
+    the WAPR/SAPR/WBPS totals, not additional elapsed time.
+    """
+    collector = _collector.get()
+    if collector is None or not collector.profile_pose:
+        return nullcontext()
+    return ComponentTimer(name, device)
 
 
 @contextmanager

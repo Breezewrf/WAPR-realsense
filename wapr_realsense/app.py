@@ -1,23 +1,30 @@
 """RealSense RGB-D to a single object's 6D pose: initialize, then track."""
 
 import argparse
+from contextlib import nullcontext
 from datetime import datetime
+from dataclasses import asdict, fields
 import json
 import os
 from pathlib import Path
+import sys
 import time
 
 import cv2
 import numpy as np
 import yaml
 
-from wapr.timing import ComponentTimer, TrackingTiming, print_timing
+from wapr.timing import ComponentTimer, TimingCollector, TrackingTiming, print_timing
+from wapr.tracking_config import TRACKING_PRESETS
 
 from .camera import RGBDFrame, RealSenseCamera
 from .geometry import check_bbox, draw_pose, load_mesh
 from .output import PoseWriter, pose_record, save_snapshot
 from .tracker import PoseSession
 from .initialization import build_initializer
+from .kalman import KalmanSettings, settings_from_args
+from .recovery import RecoverySettings, recovery_from_args
+from .yoloe import build_yoloe
 
 
 def _flatten_detection_config(config):
@@ -48,6 +55,12 @@ def _flatten_detection_config(config):
     return config
 
 
+def yoloe_metadata(args):
+    return {name[6:]:
+            str(value) if isinstance(value, Path) else value
+            for name, value in vars(args).items() if name.startswith("yoloe_")}
+
+
 def parse_args(argv=None):
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", type=Path, help="YAML configuration (.yaml/.yml); CLI flags override its values")
@@ -57,6 +70,29 @@ def parse_args(argv=None):
     parser.add_argument("--mesh-unit", choices=["m", "mm", "cm"], default="m")
     parser.add_argument("--mesh-scale", type=float, default=1.0)
     parser.add_argument("--backend", choices=["trt", "torch"], default="trt")
+    parser.add_argument("--object-mode", choices=["single", "multi"], default="single",
+                        help="TensorRT engine capacity: compact single-object or full multi-object profiles")
+    parser.add_argument("--tracking-preset", choices=TRACKING_PRESETS, default="full",
+                        help="Tracking workload only: full, balanced (2/1 iterations), fast (1/1), small-motion (SAPR only)")
+    kalman_options = parser.add_mutually_exclusive_group()
+    kalman_options.add_argument("--kalman", dest="kalman_activate", action="store_true", default=False,
+                                help="Predict the current pose before WAPR tracking")
+    kalman_options.add_argument("--no-kalman", dest="kalman_activate", action="store_false")
+    for field in fields(KalmanSettings):
+        if field.name != "activate":
+            parser.add_argument("--kalman-" + field.name.replace("_", "-"), type=float,
+                                default=field.default)
+    recovery_options = parser.add_mutually_exclusive_group()
+    recovery_options.add_argument("--tracking-recovery", dest="recovery_activate", action="store_true", default=False,
+                                  help="Retry unreliable tracks within a bounded recovery window")
+    recovery_options.add_argument("--no-tracking-recovery", dest="recovery_activate", action="store_false")
+    parser.add_argument("--recovery-timeout-s", type=float, default=1.0)
+    parser.add_argument("--recovery-confirm-frames", type=int, default=2)
+    reuse_options = parser.add_mutually_exclusive_group()
+    reuse_options.add_argument("--reuse-tracking", action="store_true", default=True,
+                              help="Reuse identical full-preset branches and crops (default)")
+    reuse_options.add_argument("--no-reuse-tracking", dest="reuse_tracking", action="store_false",
+                              help="Disable identical-branch/crop reuse for a full-preset baseline comparison")
     parser.add_argument("--init", choices=["roi", "auto"], default="roi",
                         help="Manual ROI (default) or GroundingDINO/SAM2/DINOv2 CAD detection")
     parser.add_argument("--detect-interval", type=float, default=1.0, help="Seconds between unsuccessful auto searches")
@@ -64,9 +100,22 @@ def parse_args(argv=None):
     parser.add_argument("--detect-backend", choices=["trt", "torch"], default="trt", help="DINOv2 encoder backend")
     parser.add_argument("--detect-dino", choices=["vits14", "vitb14", "vitl14"], default="vitl14")
     parser.add_argument("--detect-grounding", choices=["swint", "swinb"], default="swinb")
-    parser.add_argument("--detect-use-sam", action=argparse.BooleanOptionalAction, default=True,
+    sam_options = parser.add_mutually_exclusive_group()
+    sam_options.add_argument("--detect-use-sam", action="store_true", default=True,
                         help="Use SAM2 masks; --no-detect-use-sam uses bounding boxes")
+    sam_options.add_argument("--no-detect-use-sam", action="store_false", dest="detect_use_sam",
+                             help="Use bounding boxes without SAM2")
     parser.add_argument("--template-cache", type=Path, help="Optional CAD template .pt cache; otherwise kept in GPU memory")
+    yoloe_options = parser.add_mutually_exclusive_group()
+    yoloe_options.add_argument("--yoloe", dest="yoloe_activate", action="store_true", default=False)
+    yoloe_options.add_argument("--no-yoloe", dest="yoloe_activate", action="store_false")
+    parser.add_argument("--yoloe-model", default="yoloe-26s-seg.pt")
+    parser.add_argument("--yoloe-prompt-embeddings", type=Path,
+                        help="Pre-encoded target NPZ from examples/camera_yoloe_fuse.py")
+    parser.add_argument("--yoloe-conf", type=float, default=0.05)
+    parser.add_argument("--yoloe-imgsz", type=int, default=640)
+    parser.add_argument("--yoloe-device", default="0")
+    parser.add_argument("--yoloe-max-candidates", type=int, default=3)
     parser.add_argument("--serial", help="Select a camera by serial number")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -74,10 +123,16 @@ def parse_args(argv=None):
     parser.add_argument("--min-score", type=float, default=0.5, help="WBPS heuristic gate, not a success probability")
     parser.add_argument("--bbox", nargs=4, type=int, metavar=("X", "Y", "W", "H"))
     parser.add_argument("--no-display", action="store_true")
+    parser.add_argument("--web", action="store_true", help="Serve the browser demo with automatic or manual initialization")
+    parser.add_argument("--web-host", default="127.0.0.1", help="Use 0.0.0.0 for Jetson LAN access")
+    parser.add_argument("--web-port", type=int, default=8000)
+    parser.add_argument("--web-demo", action="store_true", help="Simulated browser lifecycle; no camera or models")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--log-poses", action="store_true", help="Also print verbose POSE_JSON records; files always contain every frame")
     parser.add_argument("--timing-interval", type=float, default=5.0, help="Seconds between tracking mean-time summaries")
+    parser.add_argument("--profile-tracking", action="store_true",
+                        help="Collect synchronized WAPR/SAPR/WBPS crop/network timings; adds profiling overhead")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--camera-frame", default="color_optical_frame")
     parser.add_argument("--object-frame", default="target_object")
@@ -91,6 +146,42 @@ def parse_args(argv=None):
             config = yaml.safe_load(content)
             if not isinstance(config, dict):
                 raise ValueError("Configuration must be a mapping")
+            section = config.pop("yoloe_detection", {})
+            if not isinstance(section, dict):
+                raise ValueError("yoloe_detection must be a mapping")
+            allowed = ("activate", "model", "prompt_embeddings",
+                       "conf", "imgsz", "device", "max_candidates")
+            for name, value in section.items():
+                if name not in allowed or "yoloe_" + name in config:
+                    raise ValueError("Unknown or duplicate yoloe_detection field: %s" % name)
+                if name == "model" and isinstance(value, str) and str(Path(value).parent) != ".":
+                    path = Path(value).expanduser()
+                    value = str(path if path.is_absolute() else (preliminary.config.resolve().parent / path).resolve())
+                config["yoloe_" + name] = value
+            section_name = "tracking_recovery"
+            names = {field.name: "recovery_" + field.name for field in fields(RecoverySettings)}
+            if any(name in config for name in names.values()):
+                raise ValueError("Configure recovery options inside %s" % section_name)
+            if section_name in config:
+                section = config.pop(section_name)
+                if not isinstance(section, dict):
+                    raise ValueError("%s must be a mapping" % section_name)
+                for name, value in section.items():
+                    if name not in names:
+                        raise ValueError("Unknown configuration field: %s.%s" % (section_name, name))
+                    config[names[name]] = value
+            section_name = "kalman_motion_prediction"
+            kalman_names = {field.name: "kalman_" + field.name for field in fields(KalmanSettings)}
+            if any(name in config for name in kalman_names.values()):
+                raise ValueError("Configure Kalman options inside %s" % section_name)
+            if section_name in config:
+                section = config.pop(section_name)
+                if not isinstance(section, dict):
+                    raise ValueError("%s must be a mapping" % section_name)
+                for name, value in section.items():
+                    if name not in kalman_names:
+                        raise ValueError("Unknown configuration field: %s.%s" % (section_name, name))
+                    config[kalman_names[name]] = value
             config = _flatten_detection_config(config)
         except (OSError, ValueError, yaml.YAMLError) as error:
             parser.error("Cannot read configuration: %s" % error)
@@ -100,7 +191,7 @@ def parse_args(argv=None):
                 parser.error("Unknown configuration field: %s" % name)
             action = actions[name]
             if value is None:
-                if name not in ("serial", "bbox", "output", "replay", "template_cache"):
+                if name not in ("serial", "bbox", "output", "replay", "template_cache", "yoloe_prompt_embeddings"):
                     parser.error("Configuration field %s cannot be null" % name)
             elif action.type is Path:
                 if not isinstance(value, str):
@@ -124,6 +215,24 @@ def parse_args(argv=None):
                 parser.error("Invalid value for configuration field %s: %s" % (name, value))
             parser.set_defaults(**{name: value})
     args = parser.parse_args(argv)
+    try:
+        settings_from_args(args)
+        recovery_from_args(args)
+    except ValueError as error:
+        parser.error(str(error))
+    if not np.isfinite(args.yoloe_conf) or not 0 <= args.yoloe_conf <= 1:
+        parser.error("YOLOE confidence must be between 0 and 1")
+    if args.yoloe_imgsz <= 0 or args.yoloe_max_candidates <= 0:
+        parser.error("YOLOE image size and maximum candidates must be positive")
+    if args.yoloe_activate and args.yoloe_prompt_embeddings is None:
+        parser.error("YOLOE requires prompt_embeddings; create the NPZ with examples/camera_yoloe_fuse.py")
+    if args.web_demo:
+        args.web = True
+    if not 1 <= args.web_port <= 65535:
+        parser.error("--web-port must be between 1 and 65535")
+    if args.web:
+        if args.replay or args.check_camera or args.bbox is not None:
+            parser.error("--web cannot be combined with --replay, --check-camera or --bbox")
     for name in ("width", "height", "fps", "print_every"):
         if getattr(args, name) <= 0:
             parser.error("--%s must be positive" % name.replace("_", "-"))
@@ -141,23 +250,26 @@ def parse_args(argv=None):
         parser.error("--timing-interval must be finite and positive")
     if args.init == "auto" and args.bbox is not None:
         parser.error("--bbox is only supported with --init roi")
-    if args.init == "roi" and args.no_display and args.bbox is None and not args.replay and not args.check_camera:
+    if args.init == "roi" and args.no_display and args.bbox is None and not args.replay and not args.check_camera and not args.web:
         parser.error("Headless tracking requires --bbox X Y W H")
     return args
 
-def timed_step(session, frame, bbox=None, tracking_timing=None):
+def timed_step(session, frame, bbox=None, tracking_timing=None, initialization_part="INIT"):
     """Measure one pose step, reporting tracking attempts even if they are rejected."""
     tracking = session.pose is not None and bbox is None
     if not tracking and tracking_timing is not None:
         tracking_timing.flush()
-    with ComponentTimer(None, session.estimator.device) as timer:
+    profile = tracking and tracking_timing is not None and tracking_timing.profile
+    components = TimingCollector(profile_pose=True) if profile else None
+    collection = components if components is not None else nullcontext()
+    with collection, ComponentTimer(None, session.estimator.device) as timer:
         status, row = session.step(frame, bbox=bbox)
     if tracking and tracking_timing is not None:
-        tracking_timing.add(timer.elapsed_ms)
+        tracking_timing.add(timer.elapsed_ms, components=components)
         if status == "lost":
             tracking_timing.flush()
     elif bbox is not None:
-        print_timing("INIT", f"WAPR initialization={timer.elapsed_ms:.2f} ms | result={status}")
+        print_timing(initialization_part, f"WAPR initialization={timer.elapsed_ms:.2f} ms | result={status}")
     return status, row, timer.elapsed_ms
 
 
@@ -200,6 +312,9 @@ def replay(args, session, mesh, output, writer, tracking_timing=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.web:
+        from .web import run
+        return run(args)
     if args.check_camera:
         with RealSenseCamera(args.width, args.height, args.fps, args.serial) as camera:
             frame = camera.read()
@@ -217,6 +332,12 @@ def main(argv=None):
                 if not cv2.imwrite(str(args.output / "rgb.png"), cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)):
                     raise OSError("Could not save camera-check image")
         return
+    if (sys.platform.startswith("linux") and not args.no_display and not args.replay
+            and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
+        raise RuntimeError(
+            "No display connection. Configure Docker/SSH display forwarding or use "
+            "--no-display --bbox X Y W H for ROI tracking / 无显示连接，请配置显示转发，"
+            "或用 --no-display --bbox X Y W H 无窗口运行")
     import torch
     from wapr import WAPREstimator
     if not torch.cuda.is_available():
@@ -225,12 +346,18 @@ def main(argv=None):
     mesh, diameter = load_mesh(args.mesh, args.mesh_unit, args.mesh_scale)
     print("LIVE_MESH", {"file": str(args.mesh), "extents_m": mesh.extents.tolist(),
                         "diameter_m": diameter, "unit": args.mesh_unit, "scale": args.mesh_scale}, flush=True)
-    estimator = WAPREstimator(device="cuda:0")
+    estimator = WAPREstimator(device="cuda:0", object_mode=args.object_mode)
     prepared = estimator.prepare_meshes([mesh])[0]
     output = args.output or Path.cwd() / "outputs" / "wapr_realsense" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     writer = PoseWriter(output)
     (output / "session.json").write_text(json.dumps({"mesh": str(args.mesh.resolve()), "mesh_unit": args.mesh_unit,
-        "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend, "init": args.init,
+        "mesh_scale": args.mesh_scale, "diameter_m": diameter, "backend": args.backend,
+        "object_mode": args.object_mode, "init": args.init,
+        "profile_tracking": args.profile_tracking,
+        "tracking_preset": args.tracking_preset, "reuse_tracking": args.reuse_tracking,
+        "kalman_motion_prediction": asdict(settings_from_args(args)),
+        "tracking_recovery": asdict(recovery_from_args(args)),
+        "yoloe_detection": yoloe_metadata(args),
         "minimum_score": args.min_score, "camera_frame": args.camera_frame, "object_frame": args.object_frame,
         "automatic_detection": None if args.init == "roi" else {
             "interval_s": args.detect_interval, "score_2d_min": args.detect_score,
@@ -240,11 +367,14 @@ def main(argv=None):
         "pose_convention": "original_scaled_mesh_to_color_optical_frame"}, indent=2))
     print("LIVE_OUTPUT", output, flush=True)
     last_frame = None
-    tracking_timing = TrackingTiming(args.timing_interval)
+    tracking_timing = TrackingTiming(args.timing_interval, profile=args.profile_tracking)
     try:
         initializer = build_initializer(args, estimator, mesh, prepared, diameter)
         session = PoseSession(estimator, prepared, diameter, minimum_score=args.min_score,
-                              initializer=initializer, detect_interval=args.detect_interval)
+                              initializer=initializer, detect_interval=args.detect_interval,
+                              tracking_preset=args.tracking_preset, reuse_tracking=args.reuse_tracking,
+                              kalman_settings=settings_from_args(args), recovery_settings=recovery_from_args(args),
+                              recovery_detector=build_yoloe(args))
         if args.replay:
             last_frame = replay(args, session, mesh, output, writer, tracking_timing)
             return

@@ -17,7 +17,9 @@ import numpy as np
 import torch
 
 from wapr import recipe
+from wapr.engine_profile import pose_profile, validate_pose_profile
 from wapr.nets import load_net
+from wapr.timing import pose_component_timer
 from wapr.pose_groups import wbps_group_sizes
 from wapr.ogl import depth2xyzmap_batch, make_crop_pair, runtime_for
 
@@ -828,7 +830,7 @@ class WAPREstimator:
         公开入口是 from wapr import WAPREstimator。
     """
 
-    def __init__(self, device="cuda:0"):
+    def __init__(self, device="cuda:0", object_mode="single"):
         """
         # 6D pose estimator.
 
@@ -859,6 +861,8 @@ class WAPREstimator:
 """
         setup_started = time.perf_counter()
         self.device = device
+        pose_profile(object_mode)
+        self.object_mode = object_mode
         use_engine = recipe.resolve_backend() == "trt"
         # Source and wheel share resources; present files never require a download.
         # 源码与 wheel 共用资源；文件齐全时不下载。
@@ -881,23 +885,25 @@ class WAPREstimator:
                     )
                 from wapr.export_engines import main as build_pose_engines
                 print("WAPR_ENGINE_BUILD", {"missing": missing_engines, "device": device}, flush=True)
-                build_pose_engines()
+                build_pose_engines(["--object-mode", object_mode])
+        # These networks execute in sequence. Avoid reserving a profile-sized
+        # activation/scratch buffer separately for every resident engine.
+        self.execution_memory = None
+        if use_engine and os.environ.get("WAPR_TRT_SHARED_MEMORY", "1") != "0":
+            from wapr.trt_memory import SharedExecutionMemory
+            self.execution_memory = SharedExecutionMemory(device)
         self.nets = {}
         for name in ("wapr_w_mask", "wapr_wo_mask", "sapr", "wbps"):
             engine = recipe.engine_file(name) if use_engine else None
-            self.nets[name] = load_net(name, recipe.weight_file(name), engine=engine, device=device)
+            self.nets[name] = load_net(name, recipe.weight_file(name), engine=engine, device=device,
+                                       execution_memory=self.execution_memory)
             loaded_engine = self.nets[name].engine
             if loaded_engine is not None:
-                expected = (min(wbps_group_sizes), int(recipe.n_view * recipe.n_inplane), max(wbps_group_sizes))
                 actual = (loaded_engine.min_batch, loaded_engine.opt_batch, loaded_engine.max_batch)
-                if actual != expected:
-                    raise RuntimeError(
-                        "%s engine profile %s is obsolete; expected %s. Rebuild locally with "
-                        "python -m wapr.export_engines" % (name, actual, expected)
-                    )
+                validate_pose_profile(actual, object_mode)
         loaded = {name: self.nets[name].engine is not None for name in self.nets}
         batch_score_path = os.path.join(os.path.dirname(os.fspath(recipe.engine_file("wbps"))), "wbps_batch.engine")
-        print("WAPR_POSE", {"backend": recipe.resolve_backend(), "fp16_engine": loaded,
+        print("WAPR_POSE", {"backend": recipe.resolve_backend(), "object_mode": object_mode, "fp16_engine": loaded,
                             "batch_score_engine_present": use_engine and os.path.isfile(batch_score_path)}, flush=True)
         # Context, shaders, and one warmup tile. Object meshes arrive later, with the first render of each mesh.
         # 上下文、着色器和一次预热绘制。物体网格要到每份网格第一次渲染时才上传。
@@ -1270,6 +1276,11 @@ class WAPREstimator:
                 "n_view * n_inplane is %d; one-object pose count must belong to %s"
                 % (asked, sorted(wbps_group_sizes))
             )
+        for name, net in self.nets.items():
+            if net.engine is not None and asked > net.engine.max_batch:
+                raise ValueError("%s engine supports at most %d candidates; requested %d. "
+                                 "Export --object-mode multi for a larger profile."
+                                 % (name, net.engine.max_batch, asked))
 
     def _refine(self, net, poses, rgb, depth, mask, K, mesh, center, diameter, iters, max_rot, crop_ratio, use_mask, meshes=None, group_size=None, observed_xyz=None, mesh_ids=None):
         """
@@ -1309,15 +1320,18 @@ class WAPREstimator:
 
 """
         poses_c = poses_original_to_centered(poses, center)
+        stage = "SAPR" if net.name == "sapr" else "WAPR"
         for _ in range(int(iters)):
-            A, B, poseA, dia = make_crop_pair(
-                rgb, depth, mask, poses_c, K, mesh, diameter,
-                crop_ratio=crop_ratio, use_mask=use_mask, device=self.device,
-                meshes=meshes,
-                observed_xyz=observed_xyz, mesh_ids=mesh_ids,
-            )
-            with torch.no_grad():
-                pred = net(A, B, L=group_size)
+            with pose_component_timer(stage + " crop", self.device):
+                A, B, poseA, dia = make_crop_pair(
+                    rgb, depth, mask, poses_c, K, mesh, diameter,
+                    crop_ratio=crop_ratio, use_mask=use_mask, device=self.device,
+                    meshes=meshes,
+                    observed_xyz=observed_xyz, mesh_ids=mesh_ids,
+                )
+            with pose_component_timer(stage + " network", self.device):
+                with torch.no_grad():
+                    pred = net(A, B, L=group_size)
             # rot is tanh-limited radians. trans is scaled by half the diameter, meters.
             # rot 是 tanh 限幅后的弧度。trans 乘直径的一半，单位米。
             rot_vec = torch.tanh(pred["rot"]) * float(max_rot)

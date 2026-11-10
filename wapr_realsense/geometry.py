@@ -42,7 +42,7 @@ def check_bbox(bbox, depth_m):
     return [x, y, w, h]
 
 
-def draw_pose(frame, mesh, row, status, processing_ms):
+def draw_pose(frame, mesh, row, status, processing_ms, show_text=True):
     """Draw only the box and axes; avoid a CPU loop over 166k triangles per frame."""
     bgr = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
     if row is not None:
@@ -72,9 +72,11 @@ def draw_pose(frame, mesh, row, status, processing_ms):
                 uv = np.rint(uv).astype(np.int32)
                 for endpoint, color in zip(uv[1:], [(0, 0, 255), (0, 255, 0), (255, 0, 0)]):
                     cv2.line(bgr, tuple(uv[0]), tuple(endpoint), color, 2)
-        text = "t [m]: " + " ".join("%.3f" % x for x in pose[:3, 3])
-        cv2.putText(bgr, text, (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 240), 1)
-    cv2.putText(bgr, "%s | %.1f ms | r: reset, s: snapshot, q: quit" % (status, processing_ms),
-                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 240, 240), 1)
+        if show_text:
+            text = "t [m]: " + " ".join("%.3f" % x for x in pose[:3, 3])
+            cv2.putText(bgr, text, (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 240, 240), 1)
+    if show_text:
+        cv2.putText(bgr, "%s | %.1f ms | r: reset, s: snapshot, q: quit" % (status, processing_ms),
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 240, 240), 1)
     return bgr
 

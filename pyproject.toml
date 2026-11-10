@@ -7,34 +7,73 @@ name = "wapr-realsense"
 version = "0.1.0"
 description = "RealSense RGB-D single-object 6D pose tracking for robotics, based on WAPR"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.8,<3.13"
 license = {file = "LICENSE"}
-dependencies = [
-    "torch==2.7.1",
-    "torchvision==0.22.1",
-    "tensorrt-cu12==10.16.1.11",
-    "tensorrt-cu12-bindings==10.16.1.11",
-    "tensorrt-cu12-libs==10.16.1.11",
-    "numpy",
-    "scipy",
-    "trimesh",
-    "Pillow",
-    "kornia",
-    "filelock",
-    "packaging",
-    "huggingface-hub>=0.34,<1",
-    "opencv-python",
-    "pyrealsense2",
-    "PyYAML>=6",
-    "onnx",
-    "pybind11",
-    "pip>=25",
+dependencies = []
+
+[dependency-groups]
+common = [
+    "ultralytics==8.4.202 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "torch==2.7.1 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "torchvision==0.22.1 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "tensorrt-cu12==10.16.1.11 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "tensorrt-cu12-bindings==10.16.1.11 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "tensorrt-cu12-libs==10.16.1.11 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "numpy ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "scipy ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "trimesh ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "Pillow ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "kornia ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "filelock ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "packaging ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "huggingface-hub>=0.34,<1 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "opencv-python ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "pyrealsense2 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "PyYAML>=6 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "onnx ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "pybind11 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "pip>=25 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
 ]
 
-# Retained for compatibility with earlier installation commands.
-[project.optional-dependencies]
-desktop = []
-export = []
+orin-nx-jetpack511 = [
+    "ultralytics==8.4.202 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "torch==2.1.0a0+41361538.nv23.06 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "torchvision==0.16.2+c6f3977 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "numpy>=1.24,<1.25 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "scipy ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "trimesh ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "Pillow ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "kornia>=0.7,<0.8 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "filelock ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "packaging ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "huggingface-hub>=0.24,<0.34 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "opencv-python<4.12 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "pyrealsense2 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "PyYAML>=6 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "onnx ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "pybind11>=2.10 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "pip>=24,<25 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+]
+thor = [
+    "ultralytics==8.4.202 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "torch ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "torchvision ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "numpy ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "scipy ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "trimesh ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "Pillow ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "kornia ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "filelock ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "packaging ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "huggingface-hub>=0.34,<1 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "opencv-python ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "pyrealsense2 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "PyYAML>=6 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "onnx ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "pybind11 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "pip>=25 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "onnxruntime-gpu @ https://github.com/ultralytics/assets/releases/download/v0.0.0/onnxruntime_gpu-1.24.0-cp312-cp312-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+]
 
 [project.scripts]
 wapr-realsense = "wapr_realsense.app:entrypoint"
@@ -43,6 +82,7 @@ wapr-realsense = "wapr_realsense.app:entrypoint"
 include = ["wapr", "wapr_realsense"]
 
 [tool.setuptools.package-data]
+wapr_realsense = ["static/*"]
 wapr = [
     "*.json", "fonts/*", "weight_license/*", "runtime_assets/**/*",
     "ogl_native/CMakeLists.txt", "ogl_native/cpp/*", "ogl_native/cuda/*",
@@ -52,10 +92,29 @@ wapr = [
 [tool.setuptools]
 license-files = ["LICENSE", "AUTHORS.md", "WEIGHTS_LICENSE.txt", "THIRD_PARTY_NOTICES.txt"]
 
-# Match the CUDA 12.6 desktop stack used by this project.
+# Platform markers separate GPU stacks. Plain uv sync keeps the desktop default.
+[tool.uv]
+default-groups = ["common"]
+# These GPU distributions are Linux-only; each group further restricts Python/CPU architecture.
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+]
+
+[tool.uv.dependency-groups]
+common = {requires-python = ">=3.10,<3.13"}
+orin-nx-jetpack511 = {requires-python = ">=3.8,<3.9"}
+thor = {requires-python = ">=3.12,<3.13"}
+
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [[tool.uv.index]]
@@ -64,7 +123,15 @@ url = "https://pypi.nvidia.com"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
-tensorrt-cu12-bindings = { index = "nvidia" }
-tensorrt-cu12-libs = { index = "nvidia" }
+torch = [
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'"},
+    {index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'"},
+    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'"},
+]
+torchvision = [
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'"},
+    {index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'"},
+    {url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/torchvision-0.16.2+c6f3977-cp38-cp38-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'"},
+]
+tensorrt-cu12-bindings = {index = "nvidia"}
+tensorrt-cu12-libs = {index = "nvidia"}

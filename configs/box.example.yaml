@@ -1,0 +1,43 @@
+# 3D mesh / 三维模型
+mesh: ../assets/meshes/box/textured_mesh_modified.obj
+mesh_unit: m
+mesh_scale: 1.0
+
+# Camera / 相机采集
+width: 640
+height: 480
+fps: 30
+
+# Pose output frames / 位姿输出坐标系名称
+camera_frame: color_optical_frame
+object_frame: box
+
+# Pose inference / 位姿推理后端与评分阈值
+backend: trt
+min_score: 0.5
+
+# Tracking / 跟踪预测与短暂失效恢复
+kalman_motion_prediction:
+  activate: true
+  max_dt_s: 0.5
+tracking_recovery:
+  activate: true
+  timeout_s: 5.0
+  confirm_frames: 2
+
+# Detection and initialization / 检测与初始化
+# activate selects auto initialization; YOLOE takes priority when enabled. / activate 控制自动初始化；启用 YOLOE 时优先使用 YOLOE。
+groundingdino_sam2_dinov2_detect:
+  activate: true
+  use_sam2: false
+yoloe_detection:
+  activate: true
+  model: yoloe-26s-seg.pt
+  prompt_embeddings: ../assets/references/box/prompt_embeddings.npz
+  conf: 0.05
+  imgsz: 640
+  device: '0'
+  max_candidates: 3
+
+# Output and logging / 输出与日志
+output: ../outputs/box_example

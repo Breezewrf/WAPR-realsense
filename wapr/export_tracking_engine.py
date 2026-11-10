@@ -23,17 +23,15 @@ import torch.nn.functional as F
 from wapr import recipe
 from wapr.export_engines import onnx_export_options
 from wapr.model_metadata import checkpoint_metadata, write_onnx_metadata, read_onnx_metadata, pack_engine
-from wapr.export_engines import _build_fp16_engine
+from wapr.export_engines import _build_fp16_engine, release_export_memory
 from wapr.nets import load_net
 from wapr.pose_groups import wbps_group_sizes
+from wapr.tracking_config import FULL_HYPOTHESES
 
 
 # Preserve the six candidates used by the one-instance tracking recipe.
 # 保留单实例跟踪配置使用的六种候选。
-tracking_hypotheses = (
-    "previous", "depth_center", "wapr_center", "sapr_center",
-    "sapr_wapr_center", "sapr_wapr_previous",
-)
+tracking_hypotheses = FULL_HYPOTHESES
 
 
 def rank_tracking_tokens(tokens, block):
@@ -88,19 +86,22 @@ class TrackingScoreWrap(nn.Module):
         return within.reshape(-1, group), between.reshape(-1, group)
 
 
-def main():
+def main(object_mode="multi"):
     """Write only wbps_tracking.onnx and wbps_tracking.engine beside WBPS.
 
     只在 WBPS 文件旁写入 wbps_tracking.onnx 和 wbps_tracking.engine。
     """
+    import tensorrt as trt
     engine_dir = os.path.dirname(os.fspath(recipe.engine_file("wbps")))
     onnx_path = os.path.join(engine_dir, "wbps_tracking.onnx")
     engine_path = os.path.join(engine_dir, "wbps_tracking.engine")
     group = len(tracking_hypotheses)
     # Share the released engine's row ceiling, keeping whole instance groups.
     # 沿用发布引擎的行数上限，并保证每个实例的候选组完整。
-    max_rows = max(wbps_group_sizes) // group * group
-    opt_rows = max(group, int(recipe.n_view * recipe.n_inplane) // group * group)
+    if object_mode not in ("single", "multi"):
+        raise ValueError("object_mode must be single or multi")
+    max_rows = group if object_mode == "single" else max(wbps_group_sizes) // group * group
+    opt_rows = min(max_rows, max(group, int(recipe.n_view * recipe.n_inplane) // group * group))
     runner = load_net("wbps", recipe.weight_file("wbps"), device="cuda:0")
     wrapper = TrackingScoreWrap(runner.module).eval()
     shape = (opt_rows, int(recipe.channels["wbps"]), int(recipe.crop_px), int(recipe.crop_px))
@@ -108,11 +109,13 @@ def main():
     B = torch.zeros_like(A)
     torch.onnx.export(
         wrapper, (A, B), onnx_path, input_names=["A", "B"],
-        output_names=["within_group", "between_group"], **onnx_export_options(),
+        output_names=["within_group", "between_group"], **onnx_export_options(trt.__version__),
         dynamic_axes={"A": {0: "pose_rows"}, "B": {0: "pose_rows"},
                       "within_group": {0: "objects"}, "between_group": {0: "objects"}},
     )
     write_onnx_metadata(onnx_path, checkpoint_metadata(recipe.weight_file("wbps"), "wbps"))
+    del runner, wrapper, A, B
+    release_export_memory()
     _build_fp16_engine(onnx_path, engine_path, (group, *shape[1:]),
                        (opt_rows, *shape[1:]), (max_rows, *shape[1:]))
     print("WAPR_TRACKING_ENGINE", {"engine": engine_path, "group": group,
@@ -120,4 +123,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--object-mode", choices=["single", "multi"], default="multi")
+    main(object_mode=parser.parse_args().object_mode)

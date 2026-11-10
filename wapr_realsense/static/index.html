@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>WAPR · Live view</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><a class="brand" href="/">WAPR<span> / </span>RealSense</a><span id="demo" hidden>SIMULATED DEMO</span><span class="caption">Live view</span></header>
+    <div class="workspace">
+      <section class="viewer" aria-label="Camera preview">
+        <img id="frame" alt="RealSense camera with object pose overlay" hidden>
+        <canvas id="selection" aria-label="Drag to draw an object bounding box" hidden></canvas>
+        <div id="placeholder"><span class="view-mark" aria-hidden="true">＋</span><p id="placeholder-text">Waiting for warmup</p></div>
+        <div class="view-label"><span></span>RGB · POSE OVERLAY</div>
+      </section>
+      <aside aria-label="Status dashboard">
+        <div class="panel-heading">SESSION<span id="connection">Connecting</span></div>
+        <div class="status" id="status-card" data-status="WARMUP">
+          <span class="eyebrow">STATUS</span>
+          <div class="status-line"><span class="indicator" aria-hidden="true"></span><strong id="status" role="status" aria-live="polite">WARMUP</strong></div>
+          <p id="hint">Preparing models and inference.</p>
+        </div>
+        <label class="mode-switch"><span>手动初始化</span><input id="manual" type="checkbox" role="switch" disabled></label>
+        <button type="button" id="draw" class="secondary" hidden disabled>重新框选<span aria-hidden="true">＋</span></button>
+        <button type="button" id="detect" disabled>Detect<span aria-hidden="true">↗</span></button>
+        <div class="timing-heading">TIMING<span>ms</span></div>
+        <details id="warmup-block" open><summary>WARMUP</summary><pre id="warmup">Waiting for timing…</pre></details>
+        <details id="search-block" hidden open><summary id="search-title">INIT</summary><pre id="search"></pre></details>
+        <details id="tracking-block" hidden open><summary>TRACKING</summary><pre id="tracking"></pre></details>
+        <p id="error" role="alert" hidden></p>
+      </aside>
+    </div>
+    <footer>Single object · 6D pose tracking<span>WAPR / SAPR / WBPS</span></footer>
+  </main>
+</body>
+</html>
