@@ -1,8 +1,0 @@
-parent_frame: robot_base
-camera_frame: color_optical_frame
-calibrated: false
-T_base_camera:
-  - [1, 0, 0, 0]
-  - [0, 1, 0, 0]
-  - [0, 0, 1, 0]
-  - [0, 0, 0, 1]

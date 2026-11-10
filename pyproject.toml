@@ -13,6 +13,7 @@ dependencies = []
 
 [dependency-groups]
 common = [
+    "ultralytics==8.4.202 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
     "torch==2.7.1 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
     "torchvision==0.22.1 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
     "tensorrt-cu12==10.16.1.11 ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.10'",
@@ -35,6 +36,7 @@ common = [
 ]
 
 orin-nx-jetpack511 = [
+    "ultralytics==8.4.202 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
     "torch==2.1.0a0+41361538.nv23.06 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
     "torchvision==0.16.2+c6f3977 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
     "numpy>=1.24,<1.25 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
@@ -53,6 +55,7 @@ orin-nx-jetpack511 = [
     "pip>=24,<25 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.8'",
 ]
 thor = [
+    "ultralytics==8.4.202 ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
     "torch ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
     "torchvision ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
     "numpy ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",

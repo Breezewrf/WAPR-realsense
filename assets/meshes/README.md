@@ -7,7 +7,7 @@
 - `material_0.png`: texture.
 
 The OBJ, MTL and texture must stay together with their relative paths preserved.
-Use `configs/box.yaml` for manual ROI or `configs/box.example.yaml` for YOLOE initialization
+Use `configs/box.example.yaml` for YOLOE initialization; add `--init roi --no-yoloe` for manual ROI
 with pre-exported reference embeddings from `assets/references/box/`.
 
 `box/` 作为示例随仓库提供；其他目标 mesh 默认由 `.gitignore` 排除。
