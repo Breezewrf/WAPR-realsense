@@ -111,15 +111,24 @@ Use `r` to reinitialize, `s` to save a snapshot and `q`/Esc to exit.
 | Interface | `--web` · `--web-host HOST` · `--web-port INT` · `--web-demo` · `--no-display` |
 | Output and timing | `--output PATH` · `--print-every INT` · `--log-poses` · `--timing-interval FLOAT` · `--profile-tracking` · `--max-frames INT` |
 
-## AGX Thor and laptop measurements
+## Orin NX, AGX Thor and laptop measurements
 
-Both runs use `configs/box.example.yaml` in Web mode, with TensorRT FP16 pose engines, `object_mode=single` and OpenGL rendering. YOLOE uses PyTorch.
+All three platforms use `configs/box.example.yaml` in Web mode, with TensorRT FP16 pose engines, `object_mode=single` and OpenGL rendering. YOLOE uses PyTorch.
 
-| Metric | Jetson AGX Thor | 4090 Laptop |
-| --- | --- | --- |
-| Total startup preparation time (model loading, camera startup and warmup) | 10.48 s | 7.60 s |
-| Full automatic initialization time (one attempt) | 163.58 ms | 120.09 ms |
-| Weighted mean tracking time per frame | 57.00 ms | 26.38 ms |
+| Metric | Orin NX 16G | Jetson AGX Thor | 4090 Laptop |
+| --- | --- | --- | --- |
+| Total startup preparation time (model loading, camera startup and warmup) | 40.52 s | 10.48 s | 7.60 s |
+| Full automatic initialization time (one attempt) | 744.51 ms | 163.58 ms | 120.09 ms |
+| Mean tracking time per frame | 234.5 ms | 57.00 ms | 26.38 ms |
+
+**Use maximum performance mode for higher speed**
+
+- List the available power modes: `sudo nvpmodel -q --verbose`
+- Select the mode labeled MAXN / maximum performance in the output: `sudo nvpmodel -m <mode-id>`
+- Lock CPU, GPU and memory clocks to the highest frequencies allowed by that mode: `sudo jetson_clocks`
+- Inspect the settings: `sudo jetson_clocks --show`
+- To also set the fan to maximum speed: `sudo jetson_clocks --fan`
+- `jetson_clocks` fixes frequencies at the limits allowed by the current `nvpmodel` mode. Reboot before switching power modes after enabling it.
 
 ## Attribution, license and acknowledgements
 

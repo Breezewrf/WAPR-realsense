@@ -114,17 +114,24 @@ python -m wapr_realsense --config configs/box.example.yaml --web --web-host 0.0.
 
 
 
-## AGX Thor 与本机性能实测
+## Orin NX、AGX Thor 与本机性能实测
 
 均运行 `configs/box.example.yaml` 的 Web 模式，使用 TensorRT FP16 位姿引擎、`object_mode=single` 和 OpenGL 渲染；YOLOE 使用 PyTorch。
 
-| 指标 | Jetson AGX Thor | 4090 Laptop |
-| --- | --- | --- |
-| 启动准备总耗时（模型加载、相机启动及预热） | 10.48 s | 7.60 s |
-| 完整自动初始化耗时（单次） | 163.58 ms | 120.09 ms |
-| 跟踪每帧加权平均耗时 | 57.00 ms | 26.38 ms |
+| 指标 | Orin NX 16G | Jetson AGX Thor | 4090 Laptop |
+| --- | --- | --- | --- |
+| 启动准备总耗时（模型加载、相机启动及预热） | 40.52 s | 10.48 s | 7.60 s |
+| 完整自动初始化耗时（单次） | 744.51 ms | 163.58 ms | 120.09 ms |
+| 跟踪每帧平均耗时 | 234.5 ms | 57.00 ms | 26.38 ms |
 
+**使用最大性能模式来获取更快的速度**
 
+- 查看本机支持的电源模式 `sudo nvpmodel -q --verbose`
+- 选择输出中标为 MAXN / 最大性能的模式 `sudo nvpmodel -m <模式编号>`
+- 锁定该模式允许的最高 CPU、GPU 和内存频率 `sudo jetson_clocks`
+- 查看设置 `sudo jetson_clocks --show`
+- 若要同时把风扇设为最高转速： `sudo jetson_clocks --fan`
+- jetson_clocks 会将频率固定到当前 nvpmodel 模式允许的上限；运行后不能直接切换电源模式，若要切换需重启
 
 ## 来源、许可与致谢
 
