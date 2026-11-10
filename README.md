@@ -4,9 +4,18 @@ English | [中文](README.zh-CN.md)
 
 RealSense RGB-D single-object 6D pose tracking based on [WAPR](https://github.com/WangYuLin-SEU/WAPR). This project uses YOLOE for automatic initialization and recovery after tracking failures, together with Kalman prediction to improve the initial pose supplied to each tracking step. It provides installation and usage instructions for deployment, including Jetson. Compared with supervised models that require object-specific data collection, annotation and training, this approach uses a 3D mesh and a few reference images of the target for fast, accurate 6D pose output.
 
-<p align="center">
-  <img src="assets/pose6d.gif" alt="Live 6D pose tracking demo" width="800">
-</p>
+<table align="center">
+  <tr>
+    <th align="center">Live 6D pose tracking</th>
+    <th width="200"></th>
+    <th align="center">Fast recovery after occlusion</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/pose6d.gif" alt="Live 6D pose tracking" width="400"></td>
+    <td width="200"></td>
+    <td align="center"><img src="assets/pose6d-recovery.gif" alt="Fast recovery after occlusion" width="400"></td>
+  </tr>
+</table>
 
 ## Installation and startup
 

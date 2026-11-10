@@ -4,9 +4,18 @@
 
 基于 [WAPR](https://github.com/WangYuLin-SEU/WAPR) 的 RealSense RGB-D 单目标 6D 位姿跟踪，本项目使用YOLOE来实现自动初始化和跟踪失败恢复，结合Kalman来改善每帧目标跟踪的搜索初值。提供详细方便的安装和使用教程，适用于在Jetson上部署，相比与传统监督模型需要针对特定物体进行数据采集标注和训练，本方法只需要目标物体的3D mesh和几张参考图片就可以完成快速准确的6D pose输出
 
-<p align="center">
-  <img src="assets/pose6d.gif" alt="实时 6D 位姿跟踪演示" width="800">
-</p>
+<table align="center">
+  <tr>
+    <th align="center">实时 6D 位姿跟踪</th>
+    <th width="200"></th>
+    <th align="center">遮挡后快速恢复</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/pose6d.gif" alt="实时 6D 位姿跟踪" width="400"></td>
+    <td width="200"></td>
+    <td align="center"><img src="assets/pose6d-recovery.gif" alt="遮挡后快速恢复" width="400"></td>
+  </tr>
+</table>
 
 ## 安装与启动
 
