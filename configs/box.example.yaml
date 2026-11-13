@@ -1,5 +1,5 @@
 # 3D mesh / 三维模型
-mesh: ../assets/meshes/box/textured_mesh_modified.obj
+mesh: ../assets/meshes/tray_scaled/model.obj
 mesh_unit: m
 mesh_scale: 1.0
 
@@ -33,7 +33,7 @@ groundingdino_sam2_dinov2_detect:
 yoloe_detection:
   activate: true
   model: yoloe-26s-seg.pt
-  prompt_embeddings: ../assets/references/box/prompt_embeddings.npz
+  prompt_embeddings: ../assets/references/tray/prompt_embeddings.npz
   conf: 0.05
   imgsz: 640
   device: '0'

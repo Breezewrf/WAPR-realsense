@@ -58,41 +58,7 @@ python -m wapr.export_engines --object-mode single  # Export pose models from Py
 python -m wapr_realsense --check-camera  # Read one RealSense RGB-D frame, align depth, convert depth units, rectify if needed, print camera/depth information and exit
 ```
 
-### 2. Prepare the required 3D mesh and reference views
-
-Skip this step when using the bundled 3D mesh and reference data.
-
-Use [camera_yoloe_fuse.py](examples/camera_yoloe_fuse.py) to create your own reference features:
-
-```bash
-python examples/camera_yoloe_fuse.py \
-  --camera 8 --model yoloe-26s-seg.pt \
-  --conf 0.05 --imgsz 640 --device 0 \
-  --output outputs/yoloe_reference
-```
-
-`--camera` is the OpenCV camera index. The collection tool requires a local desktop window. Capture different views of the same target:
-
-| Key | Action |
-| --- | --- |
-| `S` | Freeze the frame and select the target; Enter/Space confirms. Repeat to collect more views |
-| `F` | Fuse all reference views, encode and export NPZ, then preview detection |
-| `U` / `R` | Undo the last view / clear the collection; press `F` again after changes |
-| `M` / `Q` | Toggle mask preview / quit |
-
-Output files:
-
-```text
-outputs/yoloe_reference/
-  prompt_embeddings.npz  # Reference features required by the tracking runtime
-  reference_mosaic.png   # Reference-view mosaic
-  boxes.xyxy.yaml        # Boxes in mosaic coordinates
-  reference_boxes.jpg    # Box visualization
-```
-
-One NPZ represents one target class and can combine multiple views. The example combines three views: the front and two sides. The runtime loads the NPZ embeddings.
-
-### 3. Start the interface
+### 2. Start the interface
 
 | Mode | Config | Input and purpose |
 | --- | --- | --- |
@@ -123,6 +89,83 @@ Use `r` to reinitialize, `s` to save a snapshot and `q`/Esc to exit.
 | YOLOE inference | `--yoloe-conf FLOAT` · `--yoloe-imgsz INT` · `--yoloe-max-candidates INT` |
 | Interface | `--web` · `--web-host HOST` · `--web-port INT` · `--web-demo` · `--no-display` |
 | Output and timing | `--output PATH` · `--print-every INT` · `--log-poses` · `--timing-interval FLOAT` · `--profile-tracking` · `--max-frames INT` |
+
+## Start tracking your customized object
+
+Skip this section when using the bundled 3D mesh and reference data.
+
+The following uses a new tray object to walk through the full process, from multi-image 3D reconstruction to 6D pose tracking.
+
+### 1. Use Hunyuan3D for multi-image 3D reconstruction
+
+Manually photograph the object from different views and upload the images to [Hunyuan3D](https://3d.hunyuan.tencent.com/). Select 500k for the model face count, generate the model online, then download the generated 3D mesh.
+
+<p align="center">
+  <img src="assets/imgs/hunyuan3d-upload.png" alt="Upload multiple object views to Hunyuan3D and select 500k faces" width="600">
+</p>
+
+### 2. Adjust the origin, orientation and size
+
+Inspect the model in a 3D viewer. Move the coordinate origin to the center of the object, rotate the XYZ axes so X points forward and Z points up, and make sure the object dimensions are scaled correctly. The provided [resize_mesh.py](scripts/resize_mesh.py) can apply these transforms automatically in the order rotation → centering → XYZ scaling. Centering uses the bounding-box center.
+
+For `--rotation X Y Z`, angles are in degrees and rotations are applied about the fixed axes in the order X → Y → Z, following the right-hand rule: looking from the positive end of each axis toward the origin, positive angles rotate counterclockwise and negative angles rotate clockwise.
+
+```bash
+python3 scripts/resize_mesh.py ./assets/meshes/tray/tray.obj \
+  --rotation 90 0 90 --size 0.295 0.40 0.125
+```
+
+Note: `--size` uses meters by default. `--rotation 90 0 90` is the tray example; use a 3D viewer to determine the rotation angles for other objects. The script does not automatically determine the object's orientation.
+
+<p align="center">
+  <img src="assets/imgs/hunyuan3d-generated.png" alt="Inspect the tray mesh and coordinate axes in a 3D viewer" width="700">
+</p>
+
+### 3. Capture and fuse multiple surface views with RealSense
+
+Connect the RealSense camera and run [camera_yoloe_fuse.py](examples/camera_yoloe_fuse.py) on a local desktop to open the camera window:
+
+```bash
+python examples/camera_yoloe_fuse.py \
+  --camera 8 --model yoloe-26s-seg.pt \
+  --conf 0.05 --imgsz 640 --device 0 \
+  --output assets/references/tray/
+```
+
+`--camera` is the OpenCV camera index; adjust `8` for your device. Press `s` in the camera window to capture the current frame, then use the mouse to draw the smallest bbox that tightly encloses the target. Press Enter/Space to confirm. Repeat for more views, then press `f` to fuse them. `prompt_embeddings.npz` is saved automatically.
+
+| Key | Action |
+| --- | --- |
+| `S` | Freeze the frame and select the target; Enter/Space confirms. Repeat to collect more views |
+| `F` | Fuse all reference views, encode and export NPZ, then preview detection |
+| `U` / `R` | Undo the last view / clear the collection; press `F` again after changes |
+| `M` / `Q` | Toggle mask preview / quit |
+
+Output files:
+
+```text
+assets/references/tray/
+  prompt_embeddings.npz  # Reference features required by the tracking runtime
+  reference_mosaic.png   # Reference-view mosaic
+  boxes.xyxy.yaml        # Boxes in mosaic coordinates
+  reference_boxes.jpg    # Box visualization
+```
+
+One NPZ represents one target class and can combine multiple views, such as the front and two sides. The runtime loads the NPZ embeddings.
+
+### 4. Update the config YAML and start 6D pose tracking
+
+Edit the [config YAML](configs/box.example.yaml) so `mesh` and `yoloe_detection.prompt_embeddings` point to the new paths, then follow [Start the interface](#2-start-the-interface) to start 6D pose tracking.
+
+Check the mesh units: if the mesh coordinate values are in centimeters, select `--mesh-unit cm` directly in the tracking command:
+
+```bash
+python -m wapr_realsense --config configs/box.example.yaml --web --web-host 0.0.0.0
+```
+
+<p align="center">
+  <img src="assets/imgs/live-customized-object.png" alt="Live 6D pose tracking of the new tray object" width="900">
+</p>
 
 ## Orin NX, AGX Thor and laptop measurements
 
